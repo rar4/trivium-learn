@@ -3,6 +3,10 @@ setlocal
 cd /d "%~dp0"
 title Trivium Academy - Launcher
 
+if exist "%LOCALAPPDATA%\trivium\node" (
+    set "PATH=%LOCALAPPDATA%\trivium\node;%PATH%"
+)
+
 REM Executa a preparacao e configuracao autonoma
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0assets\bootstrap.ps1"
 if %errorlevel% neq 0 (

@@ -66,12 +66,15 @@ $venvPython = Join-Path $backendDir ".venv\Scripts\python.exe"
 $backendReady = $false
 if (Test-Path $venvPython) {
     try {
-        $testCode = "import fastapi, uvicorn, sqlmodel, litellm; print('TRIVIUM_DEPS_OK')"
+        Push-Location $backendDir
+        $testCode = "import fastapi, uvicorn, sqlmodel, litellm, json_repair, spellchecker, regex, webview; from app.main import app; print('TRIVIUM_DEPS_OK')"
         $checkRes = & $venvPython -c $testCode 2>$null
         if ($checkRes -match "TRIVIUM_DEPS_OK") {
             $backendReady = $true
         }
-    } catch {}
+    } catch {} finally {
+        Pop-Location
+    }
 }
 
 if (-not $backendReady) {
@@ -111,10 +114,21 @@ if (-not $backendReady) {
 
     Push-Location $backendDir
     try {
-        Write-Host "      Criando ambiente virtual com Python 3.12..." -ForegroundColor Gray
-        & $uvBin venv .venv --python 3.12
-        Write-Host "      Instalando pacotes do backend (FastAPI, SQLModel, LiteLLM, PyWebView)..." -ForegroundColor Gray
+        if (-not (Test-Path $venvPython)) {
+            Write-Host "      Criando ambiente virtual com Python 3.12..." -ForegroundColor Gray
+            & $uvBin venv .venv --python 3.12
+        }
+        Write-Host "      Instalando pacotes do backend a partir de requirements.txt..." -ForegroundColor Gray
         & $uvBin pip install -r "requirements.txt"
+
+        # Validação pós-instalação
+        $testCode = "import fastapi, uvicorn, sqlmodel, litellm, json_repair, spellchecker, regex, webview; from app.main import app; print('TRIVIUM_DEPS_OK')"
+        $checkRes = & $venvPython -c $testCode 2>&1
+        if ($checkRes -notmatch "TRIVIUM_DEPS_OK") {
+            Write-Host "      Sincronizando dependencias adicionais..." -ForegroundColor Yellow
+            & $uvBin pip install -r "requirements.txt" --upgrade
+        }
+
         Write-Host "      Configurando Chromium para exportacao de PDFs..." -ForegroundColor Gray
         try {
             & ".\.venv\Scripts\python.exe" -m playwright install chromium
@@ -141,25 +155,34 @@ if (-not (Get-Command $npmCmd -ErrorAction SilentlyContinue)) {
     }
 }
 
-if (-not (Test-Path $nodeModules)) {
+if (-not (Test-Path (Join-Path $nodeModules "next"))) {
     Write-Host "[3/4] Instalando dependencias da interface web..." -ForegroundColor Yellow
     Push-Location $frontendDir
     try {
         & $npmCmd install
+        if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao instalar dependencias do frontend (npm install)."
+        }
     } finally {
         Pop-Location
     }
+} else {
+    Write-Host "[OK] Dependencias da interface web ja verificadas." -ForegroundColor Green
 }
 
-if (-not (Test-Path $nextBuild)) {
+if (-not (Test-Path (Join-Path $nextBuild "BUILD_ID"))) {
     Write-Host "[4/4] Compilando versao de producao do frontend..." -ForegroundColor Yellow
     Push-Location $frontendDir
     try {
         & $npmCmd run build
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "      (Aviso: Build de producao reportou aviso; frontend executara em modo dev sob demanda)" -ForegroundColor DarkGray
+        } else {
+            Write-Host "[OK] Interface web pronta!" -ForegroundColor Green
+        }
     } finally {
         Pop-Location
     }
-    Write-Host "[OK] Interface web pronta!" -ForegroundColor Green
 } else {
     Write-Host "[OK] Frontend pronto." -ForegroundColor Green
 }

@@ -3,13 +3,16 @@ setlocal
 cd /d "%~dp0"
 title Trivium Academy - Modo Depuracao (Logs)
 
-if not exist "%~dp0backend\.venv\Scripts\python.exe" (
-    echo [Trivium] Primeira execucao detectada. Preparando ambiente automaticamente...
-    call "%~dp0Trivium-Launcher.bat" --setup-only
+if exist "%LOCALAPPDATA%\trivium\node" (
+    set "PATH=%LOCALAPPDATA%\trivium\node;%PATH%"
 )
-if not exist "%~dp0frontend\node_modules" (
-    echo [Trivium] Modulos do frontend ausentes. Preparando...
-    call "%~dp0Trivium-Launcher.bat" --setup-only
+
+echo [Trivium] Verificando integridade do ambiente...
+call "%~dp0Trivium-Launcher.bat" --setup-only
+if %errorlevel% neq 0 (
+    echo [ERRO] Nao foi possivel inicializar o ambiente do Trivium.
+    pause
+    exit /b 1
 )
 
 echo ========================================================

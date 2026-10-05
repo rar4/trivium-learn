@@ -21,6 +21,13 @@ except Exception:
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ["no_proxy"] = "127.0.0.1,localhost"
 
+# Garante que o Node portátil (se instalado pelo bootstrap) esteja sempre no PATH
+_localappdata = os.environ.get("LOCALAPPDATA", "")
+if _localappdata:
+    _portable_node = Path(_localappdata) / "trivium" / "node"
+    if _portable_node.exists() and str(_portable_node) not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = str(_portable_node) + os.pathsep + os.environ.get("PATH", "")
+
 # Registra o AppUserModelID para o Windows exibir o ícone correto na barra de tarefas
 try:
     if sys.platform == 'win32':
@@ -147,26 +154,36 @@ def kill_port_tree(port: int):
     try:
         out = subprocess.check_output("netstat -ano -p tcp", shell=True, text=True)
         pids = set()
+        curr_pid = os.getpid()
         for line in out.splitlines():
             if f":{port}" in line and "LISTENING" in line:
                 parts = line.strip().split()
                 if parts:
                     pid = parts[-1]
-                    if pid.isdigit() and int(pid) > 0:
+                    if pid.isdigit() and int(pid) > 0 and int(pid) != curr_pid:
                         pids.add(int(pid))
         for pid in pids:
             subprocess.run(f"taskkill /F /T /PID {pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
+BACKEND_PROC = None
+FRONTEND_PROC = None
+BACKEND_LOG_PATH = BACKEND_DIR / "storage" / "backend.log"
+FRONTEND_LOG_PATH = BACKEND_DIR / "storage" / "frontend.log"
+
 def cleanup():
     if DEBUG_MODE:
         print("\n[Trivium] Encerrando servidores locais do Trivium (:8000 e :3000)...")
+    global BACKEND_PROC, FRONTEND_PROC
+    for proc in [BACKEND_PROC, FRONTEND_PROC]:
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
     for port in [8000, 3000]:
         kill_port_tree(port)
-
-BACKEND_PROC = None
-BACKEND_LOG_PATH = BACKEND_DIR / "storage" / "backend.log"
 
 def start_services_if_needed():
     """
@@ -180,7 +197,7 @@ def start_services_if_needed():
     cflags = CREATE_NEW_CONSOLE if DEBUG_MODE else CREATE_NO_WINDOW
 
     # 1. Verifica se a porta 8000 está ocupada por um processo zumbi que não responde a HTTP
-    if is_port_in_use("127.0.0.1", 8000) and not is_http_ready("http://127.0.0.1:8000/docs", timeout=1.0):
+    if is_port_in_use("127.0.0.1", 8000) and not is_http_ready("http://127.0.0.1:8000/docs", timeout=1.5):
         if DEBUG_MODE:
             print("[Trivium] Porta 8000 ocupada por processo inativo. Reiniciando...")
         kill_port_tree(8000)
@@ -219,7 +236,7 @@ def start_services_if_needed():
                 print(f"[Trivium] Erro ao iniciar backend: {e}")
 
     # 2. Verifica se a porta 3000 está ocupada por um processo zumbi que não responde a HTTP
-    if is_port_in_use("127.0.0.1", 3000) and not is_http_ready("http://127.0.0.1:3000", timeout=1.0):
+    if is_port_in_use("127.0.0.1", 3000) and not is_http_ready("http://127.0.0.1:3000", timeout=1.5):
         if DEBUG_MODE:
             print("[Trivium] Porta 3000 ocupada por processo inativo. Reiniciando...")
         kill_port_tree(3000)
@@ -230,14 +247,26 @@ def start_services_if_needed():
         if DEBUG_MODE:
             print("[Trivium] Inicializando Frontend Next.js na porta 3000...")
 
-        npm_bin = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
+        npm_bin = shutil.which("npm.cmd") or shutil.which("npm")
+        if not npm_bin and _localappdata:
+            p_npm = Path(_localappdata) / "trivium" / "node" / "npm.cmd"
+            if p_npm.exists():
+                npm_bin = str(p_npm)
+        if not npm_bin:
+            npm_bin = "npm"
+
         is_built = (FRONTEND_DIR / ".next" / "BUILD_ID").exists()
         frontend_cmd = [npm_bin, "run", "start", "--", "-p", "3000"] if is_built else [npm_bin, "run", "dev", "--", "-p", "3000"]
 
         try:
-            subprocess.Popen(
+            BACKEND_DIR.joinpath("storage").mkdir(parents=True, exist_ok=True)
+            f_log_file = open(FRONTEND_LOG_PATH, "w", encoding="utf-8", buffering=1)
+            global FRONTEND_PROC
+            FRONTEND_PROC = subprocess.Popen(
                 frontend_cmd,
                 cwd=str(FRONTEND_DIR),
+                stdout=f_log_file,
+                stderr=subprocess.STDOUT,
                 creationflags=cflags,
                 shell=False
             )
@@ -263,7 +292,7 @@ def main():
     if DEBUG_MODE:
         print(" - [2/2] Verificando Frontend Next.js (:3000)...")
 
-    frontend_ok = wait_for_http("http://127.0.0.1:3000", 3000, timeout=40.0)
+    frontend_ok = wait_for_http("http://127.0.0.1:3000", 3000, timeout=40.0, check_proc=FRONTEND_PROC)
 
     if not backend_ok or not frontend_ok:
         msg = "Não foi possível conectar aos servidores locais do Trivium:\n"
@@ -282,9 +311,23 @@ def main():
                     print("\n================ DETALHES DO ERRO DO BACKEND ================")
                     print(log_snippet)
                     print("=============================================================\n")
-                msg += f"\nDetalhes do erro:\n{log_snippet[:350]}\n"
+                msg += f"\nDetalhes do erro do backend:\n{log_snippet[:350]}\n"
         if not frontend_ok:
             msg += " • Frontend Next.js (:3000) não respondeu a tempo.\n"
+            f_log_snippet = ""
+            if FRONTEND_LOG_PATH.exists():
+                try:
+                    with open(FRONTEND_LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = [l for l in f.readlines() if l.strip()]
+                        f_log_snippet = "".join(lines[-12:])
+                except Exception:
+                    pass
+            if f_log_snippet:
+                if DEBUG_MODE:
+                    print("\n================ DETALHES DO ERRO DO FRONTEND ================")
+                    print(f_log_snippet)
+                    print("==============================================================")
+                msg += f"\nDetalhes do erro do frontend:\n{f_log_snippet[:350]}\n"
         msg += "\nExecute Trivium-Dev-Console.bat para verificar os logs completos."
         
         if sys.platform == "win32":
