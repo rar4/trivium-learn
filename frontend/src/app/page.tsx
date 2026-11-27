@@ -9,7 +9,9 @@ import {
 } from "lucide-react";
 import { 
   createCourse, getJobStatus, getCourses, JobStatusResponse, CourseListItem,
-  uploadDocument, generateCourseFromDocument, DocumentUploadResponse
+  uploadDocument, generateCourseFromDocument, DocumentUploadResponse,
+  getCatalog, getCatalogCategories, getProfileStats, recordActivity,
+  CatalogItem, CatalogCategory, ProfileStats
 } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import SettingsModal from "@/components/SettingsModal";
@@ -73,6 +75,26 @@ export default function HomePage() {
   const [existingCourses, setExistingCourses] = useState<CourseListItem[]>([]);
   const [loadingCourses, setLoadingCourses] = useState<boolean>(true);
 
+  // Catálogo público (descoberta por categoria) + gamificação
+  const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
+  const [catalogCats, setCatalogCats] = useState<CatalogCategory[]>([]);
+  const [catalogCat, setCatalogCat] = useState<string>("all");
+  const [catalogQuery, setCatalogQuery] = useState<string>("");
+  const [profileStats, setProfileStats] = useState<ProfileStats | null>(null);
+
+  const fetchCatalog = () => {
+    getCatalog({ category: catalogCat, q: catalogQuery || undefined })
+      .then(setCatalogItems)
+      .catch(() => setCatalogItems([]));
+  };
+
+  useEffect(() => { fetchCatalog(); }, [catalogCat]);
+  useEffect(() => {
+    getCatalogCategories().then(setCatalogCats).catch(() => {});
+    getProfileStats().then(setProfileStats).catch(() => {});
+    recordActivity();
+  }, []);
+
   // Job de Esteira
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatusResponse | null>(null);
@@ -83,7 +105,7 @@ export default function HomePage() {
     setLoadingCourses(true);
     getCourses()
       .then((data) => {
-        setExistingCourses(data.filter((c) => c.total_lessons > 0));
+        setExistingCourses(data);
         setLoadingCourses(false);
       })
       .catch((err) => {
@@ -205,6 +227,14 @@ export default function HomePage() {
           </div>
         </div>
         <div className="flex items-center space-x-3 text-xs font-semibold tracking-wider text-neutral-400">
+          {profileStats && (
+            <div className="hidden sm:flex items-center space-x-3 bg-[#18181b] border border-[#27272a] rounded-xl px-3 py-1.5" title="XP / streak / level — earned from completed steps only">
+              <span className="text-[#ffe500] font-black">⚡ {profileStats.xp} XP</span>
+              <span>🔥 {profileStats.streak_days}</span>
+              <span>🎚 Lv {profileStats.level}</span>
+              {profileStats.reviews_due > 0 && <span className="text-amber-400">↻ {profileStats.reviews_due}</span>}
+            </div>
+          )}
           {/* Seletor de Idioma da Interface com Bandeiras 2D */}
           <div className="flex items-center bg-[#18181b] border border-[#27272a] rounded-xl p-1 space-x-1">
             <button
@@ -614,6 +644,46 @@ export default function HomePage() {
           </div>
         </div>
 
+        {/* Catálogo público — descoberta por categoria (sem contagens) */}
+        <div className="mt-14 pt-10 border-t border-[#1f1f23]">
+          <div className="mb-5">
+            <span className="text-xs font-bold uppercase tracking-widest text-[#ffe500]">{uiLang === "en-US" ? "Discover" : "Descobrir"}</span>
+            <h3 className="text-2xl font-black text-white mt-0.5">{uiLang === "en-US" ? "Browse skills by category" : "Explorar habilidades por categoria"}</h3>
+            <p className="text-xs text-neutral-500 mt-1">{uiLang === "en-US" ? "Start a new skill. Once inside a course, the path is blind — one step at a time." : "Comece uma nova habilidade. Dentro do curso, o caminho é cego — um passo por vez."}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <button type="button" onClick={() => setCatalogCat("all")} className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${catalogCat === "all" ? "bg-[#ffe500] text-black border-[#ffe500]" : "bg-[#141416] text-neutral-300 border-[#27272a] hover:border-[#ffe500]/50"}`}>{uiLang === "en-US" ? "All" : "Todas"}</button>
+            {catalogCats.map((cat) => (
+              <button key={cat.id} type="button" onClick={() => setCatalogCat(cat.id)} className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${catalogCat === cat.id ? "bg-[#ffe500] text-black border-[#ffe500]" : "bg-[#141416] text-neutral-300 border-[#27272a] hover:border-[#ffe500]/50"}`}>{uiLang === "en-US" ? cat.label_en : cat.label_pt}</button>
+            ))}
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2 mb-5">
+            <input value={catalogQuery} onChange={(e) => setCatalogQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") fetchCatalog(); }} placeholder={uiLang === "en-US" ? "Search a skill… (e.g. piano, trading, Python)" : "Buscar uma habilidade… (ex.: piano, trading, Python)"} className="flex-1 bg-[#141416] border border-[#27272a] rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-neutral-500 focus:outline-none focus:border-[#ffe500]/60" />
+            <button type="button" onClick={fetchCatalog} className="px-5 py-2.5 rounded-xl bg-[#ffe500] text-black font-black text-xs cursor-pointer">{uiLang === "en-US" ? "Search" : "Buscar"}</button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {catalogItems.map((item) => {
+              const catLabel = catalogCats.find((x) => x.id === item.category);
+              return (
+                <div key={item.id} onClick={() => router.push(`/course/${item.id}`)} className="group bg-[#141416] hover:bg-[#19191d] border border-[#27272a] hover:border-[#ffe500] rounded-2xl p-5 cursor-pointer transition-all">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="text-[10px] uppercase tracking-wider font-extrabold px-2.5 py-1 rounded-md bg-[#222226] text-neutral-200">{catLabel ? (uiLang === "en-US" ? catLabel.label_en : catLabel.label_pt) : item.category}</span>
+                    <span className="text-[10px] uppercase tracking-wider font-extrabold px-2.5 py-1 rounded-md bg-[#222226] text-neutral-300">{formatCourseLevel(item.level, uiLang)}</span>
+                  </div>
+                  <h4 className="text-base font-extrabold text-white group-hover:text-[#ffe500] transition-colors">{item.subject}</h4>
+                  <div className="mt-4 flex items-center justify-between text-xs font-bold text-neutral-400 group-hover:text-white">
+                    <span>{uiLang === "en-US" ? "Start the journey" : "Começar a jornada"}</span>
+                    <ArrowRight className="w-4 h-4 text-[#ffe500]" />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {catalogItems.length === 0 && (
+            <p className="text-xs text-neutral-500 py-4">{uiLang === "en-US" ? "No skills here yet — generate one above." : "Nenhuma habilidade aqui ainda — gere uma acima."}</p>
+          )}
+        </div>
+
         {/* Seção da Biblioteca de Cursos Salvos */}
         <div className="mt-14 pt-10 border-t border-[#1f1f23]">
           <div className="flex items-center justify-between mb-6">
@@ -689,8 +759,8 @@ export default function HomePage() {
                             {c.language === "en-US" ? "EN - US" : "PT - BR"}
                           </span>
                         </div>
-                        <span className="text-xs font-bold text-[#ffe500]">
-                          {c.progress_percent}%
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[#18181b] text-[#ffe500] border border-[#ffe500]/30 uppercase">
+                          {c.category ?? "•"}
                         </span>
                       </div>
 
@@ -710,9 +780,10 @@ export default function HomePage() {
                           </span>
                         )}
                         <span>•</span>
-                        <span>
-                          {c.total_modules} {t.modules_lessons_label.replace("{lessons}", String(c.total_lessons))}
-                        </span>
+                        <span>{formatCourseLevel(c.level, uiLang)}</span>
+                        {c.completed_lessons > 0 && (
+                          <span>• ✓ {c.completed_lessons} {uiLang === "en-US" ? "done" : "concluídas"}</span>
+                        )}
                       </div>
                     </div>
 

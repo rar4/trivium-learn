@@ -1,0 +1,47 @@
+# Trivium Learn — Learn-Anything Platform (on top of trivium-ai)
+
+Fork of [F3LP5/trivium-ai](https://github.com/F3LP5/trivium-ai) (MIT).
+The AI course engine is untouched — this layer adds the product on top:
+public catalog by skill category, Fog-of-War progression, gamification,
+spaced repetition, and a mastery certificate.
+
+## What was added
+
+| Area | Where | What |
+| ---- | ----- | ---- |
+| Catalog | `backend/app/services/catalog.py`, `GET /api/catalog`, `GET /api/catalog/categories` | 10 skill categories (Code, Music, Money, Business, Mind & Logic, Design, Language, Craft, Science, Life), deterministic keyword classifier, search + category filter. Cards show **topic / category / difficulty only**. |
+| Fog-of-War | `GET /api/courses/{id}`, `GET /api/courses/{id}/next-step`, locked-lesson `403` | Inside a course the API returns **only the current step + completed steps**. Future module/lesson titles, counts (`total_modules`, `total_lessons`) and `progress_percent` are stripped server-side. Direct access to a locked lesson returns `403` with no title leak. |
+| Trivium gates | `GET /api/lessons/{id}/gates` | Grammar (MCQ mastery) → Logic (simulation / discursive) → Rhetoric (Socratic duel). Unlock only fires when all gates pass (`check_and_unlock_lesson`, unchanged). |
+| Gamification | `GET /api/profile/stats`, `POST /api/profile/activity` | XP (25 per completed lesson, 10 per review), level ring, streak, badges. Computed **only from completed work** — never from future totals. |
+| Spaced repetition | `GET /api/reviews/due`, `POST /api/reviews/{id}/complete` | Missed quizzes queue a review due tomorrow; completing doubles the interval. |
+| Certificate | `GET /api/courses/{id}/certificate` | Unlocks only when every step is completed; returns a share URL. |
+| UI | `frontend/src/app/page.tsx`, `frontend/src/app/course/[id]/page.tsx` | Catalog section with category chips + search, gamification chip in the header, course page rewritten as a single blind "current step" card + mastered-steps review list. No roadmap, no counts, no SkillTree. |
+
+Engine files intentionally **not modified**: `backend/app/agents/pipeline.py`,
+`backend/app/services/researcher.py`, `backend/app/schemas/curriculum.py`,
+`backend/app/schemas/quiz.py`, `backend/app/graph/orchestrator.py`.
+
+Auth is a single local learner profile (singleton DB row) — the DB is the
+sync layer; swapping in real multi-user auth means scoping `LearnerProfile`
+by user id later.
+
+## Run
+
+```bash
+# backend
+cd backend && pip install -r requirements.txt
+uvicorn app.main:app --port 8000
+
+# frontend
+cd frontend && npm install && npm run dev   # NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+## Tests
+
+```bash
+cd backend && python -m pytest tests/test_platform.py -q
+```
+
+The test seeds a course with secret future titles and asserts the API never
+leaks them (nor any total/percent), that gates enforce Grammar → Logic →
+Rhetoric before unlock, and that XP only counts completed lessons.

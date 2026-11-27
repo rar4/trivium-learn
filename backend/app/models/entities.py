@@ -79,3 +79,22 @@ class GenerationJob(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=get_utc_now)
     updated_at: datetime = Field(default_factory=get_utc_now)
+
+class LearnerProfile(SQLModel, table=True):
+    """Single local learner (singleton row id=1). Cloud sync = this DB row."""
+    id: int = Field(default=1, primary_key=True)
+    display_name: str = Field(default="Learner")
+    last_active_date: Optional[str] = Field(default=None) # YYYY-MM-DD
+    streak_days: int = Field(default=0)
+    reviews_completed: int = Field(default=0)
+    created_at: datetime = Field(default_factory=get_utc_now)
+    updated_at: datetime = Field(default_factory=get_utc_now)
+
+class ReviewItem(SQLModel, table=True):
+    """Spaced-repetition queue for missed quiz items (revealed lessons only)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    lesson_id: int = Field(foreign_key='lesson.id', index=True)
+    due_on: str = Field(index=True) # YYYY-MM-DD
+    interval_days: int = Field(default=1)
+    misses: int = Field(default=0)
+    created_at: datetime = Field(default_factory=get_utc_now)

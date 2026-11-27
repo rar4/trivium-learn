@@ -10,7 +10,7 @@ DATABASE_URL = os.getenv('DATABASE_URL', f'sqlite:///{DB_PATH.as_posix()}')
 engine = create_engine(DATABASE_URL, echo=False, connect_args={'check_same_thread': False, 'timeout': 30.0})
 
 def init_db():
-    from app.models.entities import Course, Module, Lesson, GenerationJob
+    from app.models.entities import Course, Module, Lesson, GenerationJob, LearnerProfile, ReviewItem, LessonChatMessage
     
     with engine.connect() as conn:
         from sqlalchemy import text

@@ -12,10 +12,72 @@ export interface CourseListItem {
   source_book_filename?: string;
   source_book_pages?: number;
   created_at?: string;
-  total_modules: number;
-  total_lessons: number;
+  category?: string;
+  // Fog-of-War: totals / percent-to-total are never returned by the API.
   completed_lessons: number;
-  progress_percent: number;
+}
+
+export interface CatalogCategory {
+  id: string;
+  label_en: string;
+  label_pt: string;
+}
+
+export interface CatalogItem {
+  id: number;
+  subject: string;
+  level: string;
+  category: string;
+  language?: string;
+  cover_image_url?: string;
+  source_type?: "web" | "document";
+  created_at?: string;
+}
+
+export interface LessonStepSummary {
+  id: number;
+  title: string;
+  core_concept: string;
+  status: "locked" | "in_progress" | "completed";
+}
+
+export interface NextStepResponse {
+  course_id: number;
+  subject: string;
+  level: string;
+  category: string;
+  language?: string;
+  fog_of_war: boolean;
+  current_step: LessonStepSummary | null;
+  completed_lessons: LessonStepSummary[];
+  is_course_complete: boolean;
+}
+
+export interface LessonGates {
+  lesson_id: number;
+  grammar: boolean;
+  logic: boolean;
+  rhetoric: boolean;
+  lesson_completed: boolean;
+}
+
+export interface ProfileStats {
+  xp: number;
+  level: number;
+  streak_days: number;
+  completed_lessons: number;
+  badges: string[];
+  reviews_completed: number;
+  reviews_due: number;
+}
+
+export interface CertificateData {
+  course_id: number;
+  subject: string;
+  completed_lessons: number;
+  issued_at: string;
+  share_id: string;
+  share_url: string;
 }
 
 export interface CourseSource {
@@ -28,6 +90,10 @@ export interface CourseSummary {
   id: number;
   subject: string;
   level: string;
+  category?: string;
+  fog_of_war?: boolean;
+  completed_lessons?: LessonStepSummary[];
+  next_step?: LessonStepSummary | null;
   language?: string;
   access_mode?: "open" | "guided";
   cover_image_url?: string;
@@ -203,6 +269,53 @@ export async function getCourses(): Promise<CourseListItem[]> {
 export async function getCourse(courseId: number): Promise<CourseSummary> {
   const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}`);
   if (!res.ok) throw new Error("Falha ao carregar curso");
+  return res.json();
+}
+
+export async function getCatalogCategories(): Promise<CatalogCategory[]> {
+  const res = await fetch(`${API_BASE_URL}/api/catalog/categories`);
+  if (!res.ok) throw new Error("Falha ao carregar categorias");
+  return res.json();
+}
+
+export async function getCatalog(params?: { category?: string; q?: string; difficulty?: string }): Promise<CatalogItem[]> {
+  const qs = new URLSearchParams();
+  if (params?.category) qs.set("category", params.category);
+  if (params?.q) qs.set("q", params.q);
+  if (params?.difficulty) qs.set("difficulty", params.difficulty);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const res = await fetch(`${API_BASE_URL}/api/catalog${suffix}`);
+  if (!res.ok) throw new Error("Falha ao carregar catálogo");
+  return res.json();
+}
+
+export async function getNextStep(courseId: number): Promise<NextStepResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/next-step`);
+  if (!res.ok) throw new Error("Falha ao carregar próximo passo");
+  return res.json();
+}
+
+export async function getLessonGates(lessonId: number): Promise<LessonGates> {
+  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/gates`);
+  if (!res.ok) throw new Error("Falha ao carregar gates");
+  return res.json();
+}
+
+export async function getProfileStats(): Promise<ProfileStats> {
+  const res = await fetch(`${API_BASE_URL}/api/profile/stats`);
+  if (!res.ok) throw new Error("Falha ao carregar perfil");
+  return res.json();
+}
+
+export async function recordActivity(): Promise<void> {
+  try {
+    await fetch(`${API_BASE_URL}/api/profile/activity`, { method: "POST" });
+  } catch { /* best-effort streak */ }
+}
+
+export async function getCertificate(courseId: number): Promise<CertificateData> {
+  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/certificate`);
+  if (!res.ok) throw new Error("Certificado ainda não disponível");
   return res.json();
 }
 

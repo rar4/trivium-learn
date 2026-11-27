@@ -13,7 +13,9 @@ from pydantic import BaseModel
 import logging
 
 from app.database import init_db, get_session, engine
-from app.models.entities import Course, Module, Lesson, GenerationJob, LessonChatMessage
+from app.models.entities import Course, Module, Lesson, GenerationJob, LessonChatMessage, LearnerProfile, ReviewItem
+from app.services import catalog as _catalog
+from datetime import date, timedelta
 from app.graph.orchestrator import CourseOrchestrator
 from app.agents.pipeline import GraderAgent, normalize_level
 from app.services.tutor_service import TutorService
@@ -393,47 +395,39 @@ def list_courses(session: Session = Depends(get_session)):
             "source_type": getattr(c, "source_type", "web") or "web",
             "source_book_filename": getattr(c, "source_book_filename", None),
             "source_book_pages": getattr(c, "source_book_pages", None),
-            "total_modules": len(modules),
-            "total_lessons": len(lessons),
-            "completed_lessons": len(completed_lessons),
-            "progress_percent": int((len(completed_lessons) / len(lessons) * 100)) if lessons else 0
+            "category": _catalog.classify_category(c.subject),
+            # Fog-of-War: totals and percent-to-total are never exposed.
+            "completed_lessons": len(completed_lessons)
         })
     return results
 
 @app.get("/api/courses/{course_id}")
 def get_course_details(course_id: int, session: Session = Depends(get_session)):
+    """Fog-of-War course view: current step + completed steps only."""
     course = session.get(Course, course_id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso nao encontrado")
-    
-    modules = session.exec(select(Module).where(Module.course_id == course_id).order_by(Module.module_number)).all()
+
+    ordered = _ordered_lessons(session, course_id)
+    completed = [_lesson_summary(l) for _, l in ordered if l.status == "completed"]
+    current_pair = next(((m, l) for m, l in ordered if l.status != "completed"), None)
+    if current_pair is not None and current_pair[1].status == "locked":
+        current_pair = None
+
     modules_res = []
-    for mod in modules:
-        lessons = session.exec(select(Lesson).where(Lesson.module_id == mod.id).order_by(Lesson.lesson_number)).all()
+    if current_pair is not None:
+        cur_mod, cur_lesson = current_pair
         modules_res.append({
-            "id": mod.id,
-            "module_number": mod.module_number,
-            "title": mod.title,
-            "is_unlocked": mod.is_unlocked,
-            "is_completed": mod.is_completed,
-            "lessons": [
-                {
-                    "id": l.id,
-                    "lesson_number": l.lesson_number,
-                    "title": l.title,
-                    "core_concept": l.core_concept,
-                    "status": l.status,
-                    "mcq_score": l.mcq_score,
-                    "discursive_passed": l.discursive_passed
-                }
-                for l in lessons
-            ]
+            "id": cur_mod.id, "module_number": cur_mod.module_number, "title": cur_mod.title,
+            "is_unlocked": True, "is_completed": False,
+            "lessons": [_lesson_summary(cur_lesson)],
         })
 
     return {
         "id": course.id,
         "subject": course.subject,
         "level": course.level,
+        "category": _catalog.classify_category(course.subject),
         "language": getattr(course, "language", "pt-BR") or "pt-BR",
         "access_mode": getattr(course, "access_mode", "open") or "open",
         "cover_image_url": course.cover_image_url,
@@ -441,9 +435,11 @@ def get_course_details(course_id: int, session: Session = Depends(get_session)):
         "source_type": getattr(course, "source_type", "web") or "web",
         "source_book_filename": getattr(course, "source_book_filename", None),
         "source_book_pages": getattr(course, "source_book_pages", None),
-        "research_dossier": course.research_dossier,
+        "fog_of_war": True,
         "sources": json.loads(course.sources_json) if course.sources_json else [],
-        "modules": modules_res
+        "modules": modules_res,
+        "completed_lessons": completed,
+        "next_step": _lesson_summary(current_pair[1]) if current_pair else None,
     }
 
 class CourseAccessModeRequest(BaseModel):
@@ -498,6 +494,9 @@ def delete_course(course_id: int, session: Session = Depends(get_session)):
                     except Exception:
                         pass
 
+    lesson_ids = [l.id for l in lessons if l.id is not None]
+    if lesson_ids:
+        session.exec(delete(ReviewItem).where(ReviewItem.lesson_id.in_(lesson_ids)))
     # 3. Exclui GenerationJobs vinculados ao curso
     jobs = session.exec(select(GenerationJob).where(GenerationJob.course_id == course_id)).all()
     for job in jobs:
@@ -526,7 +525,10 @@ def get_lesson(lesson_id: int, session: Session = Depends(get_session)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula nao encontrada")
-    
+    if lesson.status == "locked":
+        # Fog-of-War: unrevealed lessons leak nothing — not even a title.
+        raise HTTPException(status_code=403, detail="Lesson not yet revealed. Complete the current step first.")
+
     mod = session.get(Module, lesson.module_id)
     course = session.get(Course, mod.course_id) if mod else None
     quiz_data = json.loads(lesson.quiz_json) if lesson.quiz_json else None
@@ -609,6 +611,192 @@ def check_and_unlock_lesson(session: Session, lesson: Lesson):
                             first_lesson_next.status = "in_progress"
                             session.add(first_lesson_next)
 
+
+# ---------------------------------------------------------------------------
+# Learn-Anything layer: Fog-of-War, catalog, gamification, spaced repetition
+# ---------------------------------------------------------------------------
+
+def _ordered_lessons(session: Session, course_id: int):
+    modules = session.exec(select(Module).where(Module.course_id == course_id).order_by(Module.module_number)).all()
+    ordered = []
+    for mod in modules:
+        lessons = session.exec(select(Lesson).where(Lesson.module_id == mod.id).order_by(Lesson.lesson_number)).all()
+        for l in lessons:
+            ordered.append((mod, l))
+    return ordered
+
+def _lesson_summary(l: Lesson):
+    return {"id": l.id, "title": l.title, "core_concept": l.core_concept, "status": l.status}
+
+def _now_utc():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+def _touch_activity(session: Session):
+    today = date.today().isoformat()
+    profile = session.get(LearnerProfile, 1)
+    if profile is None:
+        profile = LearnerProfile(id=1)
+        session.add(profile)
+    if profile.last_active_date == today:
+        return profile
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    if profile.last_active_date == yesterday:
+        profile.streak_days = (profile.streak_days or 0) + 1
+    else:
+        profile.streak_days = 1
+    profile.last_active_date = today
+    profile.updated_at = _now_utc()
+    session.add(profile)
+    return profile
+
+def _gates_for(lesson: Lesson):
+    quiz_data = json.loads(lesson.quiz_json) if lesson.quiz_json else {}
+    has_sim = bool(quiz_data.get("simulation"))
+    has_soc = bool(quiz_data.get("socratic_duel"))
+    total_mcqs = len(quiz_data.get("mcq", []))
+    min_mcq = 2 if total_mcqs <= 3 else 3
+    grammar = lesson.mcq_score is not None and lesson.mcq_score >= min_mcq
+    logic = lesson.simulation_passed if has_sim else (lesson.discursive_passed or False)
+    rhetoric = lesson.socratic_passed if has_soc else (lesson.discursive_passed or False)
+    return {"grammar": bool(grammar), "logic": bool(logic), "rhetoric": bool(rhetoric),
+            "lesson_completed": lesson.status == "completed"}
+
+def _completed_count(session: Session) -> int:
+    return len(session.exec(select(Lesson).where(Lesson.status == "completed")).all())
+
+@app.get("/api/catalog/categories")
+def catalog_categories():
+    return [{"id": c["id"], "label_en": c["label_en"], "label_pt": c["label_pt"]} for c in _catalog.CATEGORIES]
+
+@app.get("/api/catalog")
+def get_catalog(category: Optional[str] = None, q: Optional[str] = None, difficulty: Optional[str] = None,
+                session: Session = Depends(get_session)):
+    """Discovery-only listing: category / difficulty / topic. NEVER counts or totals."""
+    courses = session.exec(select(Course).order_by(Course.id.desc())).all()
+    out = []
+    for c in courses:
+        cat = _catalog.classify_category(c.subject)
+        if category and category != "all" and cat != category:
+            continue
+        if difficulty and difficulty.lower() not in (c.level or "").lower():
+            continue
+        if q and q.lower() not in (c.subject or "").lower():
+            continue
+        out.append({
+            "id": c.id, "subject": c.subject, "level": c.level, "category": cat,
+            "language": getattr(c, "language", "pt-BR") or "pt-BR",
+            "cover_image_url": c.cover_image_url,
+            "source_type": getattr(c, "source_type", "web") or "web",
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        })
+    return out
+
+@app.get("/api/profile")
+def get_profile(session: Session = Depends(get_session)):
+    profile = session.get(LearnerProfile, 1)
+    if profile is None:
+        profile = LearnerProfile(id=1)
+        session.add(profile)
+        session.commit()
+    return {"id": profile.id, "display_name": profile.display_name}
+
+@app.post("/api/profile/activity")
+def record_activity(session: Session = Depends(get_session)):
+    _touch_activity(session)
+    session.commit()
+    return {"success": True}
+
+@app.get("/api/profile/stats")
+def profile_stats(session: Session = Depends(get_session)):
+    profile = session.get(LearnerProfile, 1)
+    reviews_completed = profile.reviews_completed if profile else 0
+    streak = profile.streak_days if profile else 0
+    completed = _completed_count(session)
+    xp = _catalog.xp_for_completed(completed, reviews_completed)
+    today = date.today().isoformat()
+    due = len(session.exec(select(ReviewItem).where(ReviewItem.due_on <= today)).all())
+    return {
+        "xp": xp, "level": _catalog.level_for_xp(xp),
+        "streak_days": streak, "completed_lessons": completed,
+        "badges": _catalog.badges_for(completed, streak),
+        "reviews_completed": reviews_completed, "reviews_due": due,
+    }
+
+@app.get("/api/reviews/due")
+def reviews_due(session: Session = Depends(get_session)):
+    today = date.today().isoformat()
+    items = session.exec(select(ReviewItem).where(ReviewItem.due_on <= today).order_by(ReviewItem.due_on)).all()
+    out = []
+    for it in items:
+        lesson = session.get(Lesson, it.lesson_id)
+        if lesson:
+            out.append({"id": it.id, "lesson_id": lesson.id, "title": lesson.title,
+                        "due_on": it.due_on, "interval_days": it.interval_days, "misses": it.misses})
+    return out
+
+@app.post("/api/reviews/{item_id}/complete")
+def complete_review(item_id: int, session: Session = Depends(get_session)):
+    item = session.get(ReviewItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    item.interval_days = max(1, item.interval_days * 2)
+    item.due_on = (date.today() + timedelta(days=item.interval_days)).isoformat()
+    profile = session.get(LearnerProfile, 1)
+    if profile is None:
+        profile = LearnerProfile(id=1)
+        session.add(profile)
+    profile.reviews_completed = (profile.reviews_completed or 0) + 1
+    session.add(item); session.add(profile); session.commit()
+    return {"success": True, "next_due_on": item.due_on}
+
+@app.get("/api/lessons/{lesson_id}/gates")
+def lesson_gates(lesson_id: int, session: Session = Depends(get_session)):
+    lesson = session.get(Lesson, lesson_id)
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    if lesson.status == "locked":
+        raise HTTPException(status_code=403, detail="Lesson not yet revealed. Complete the current step first.")
+    return {"lesson_id": lesson.id, **_gates_for(lesson)}
+
+@app.get("/api/courses/{course_id}/next-step")
+def course_next_step(course_id: int, session: Session = Depends(get_session)):
+    """Fog-of-War: ONLY the current step + already-completed steps are returned."""
+    course = session.get(Course, course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    ordered = _ordered_lessons(session, course_id)
+    completed = [_lesson_summary(l) for _, l in ordered if l.status == "completed"]
+    current = next((l for _, l in ordered if l.status != "completed"), None)
+    if current is not None and current.status == "locked":
+        current = None
+    return {
+        "course_id": course.id, "subject": course.subject, "level": course.level,
+        "category": _catalog.classify_category(course.subject),
+        "language": getattr(course, "language", "pt-BR") or "pt-BR",
+        "fog_of_war": True,
+        "current_step": _lesson_summary(current) if current else None,
+        "completed_lessons": completed,
+        "is_course_complete": bool(ordered) and current is None,
+    }
+
+@app.get("/api/courses/{course_id}/certificate")
+def course_certificate(course_id: int, session: Session = Depends(get_session)):
+    course = session.get(Course, course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    ordered = _ordered_lessons(session, course_id)
+    if not ordered or any(l.status != "completed" for _, l in ordered):
+        raise HTTPException(status_code=403, detail="Certificate unlocks when every step is completed.")
+    import hashlib
+    share_id = hashlib.sha256(f"{course.id}:{course.subject}".encode()).hexdigest()[:12]
+    return {
+        "course_id": course.id, "subject": course.subject,
+        "completed_lessons": len(ordered),
+        "issued_at": date.today().isoformat(), "share_id": share_id,
+        "share_url": f"/course/{course.id}?share={share_id}",
+    }
+
 @app.post("/api/lessons/{lesson_id}/submit-quiz")
 async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = Depends(get_session)):
     lesson = session.get(Lesson, lesson_id)
@@ -643,9 +831,19 @@ async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = 
     lesson.blanks_score = blanks_correct
     check_and_unlock_lesson(session, lesson)
     session.add(lesson)
-    session.commit()
-
     is_passed = mcq_correct >= min_required
+    if is_passed:
+        _touch_activity(session)
+    else:
+        existing = session.exec(select(ReviewItem).where(ReviewItem.lesson_id == lesson_id)).first()
+        if existing:
+            existing.misses = (existing.misses or 0) + 1
+            existing.interval_days = 1
+            existing.due_on = (date.today() + timedelta(days=1)).isoformat()
+            session.add(existing)
+        else:
+            session.add(ReviewItem(lesson_id=lesson_id, due_on=(date.today() + timedelta(days=1)).isoformat(), interval_days=1, misses=1))
+    session.commit()
     
     mod = session.get(Module, lesson.module_id)
     course = session.get(Course, mod.course_id) if mod else None
@@ -694,6 +892,8 @@ async def submit_discursive(lesson_id: int, req: DiscursiveSubmitRequest, sessio
 
     check_and_unlock_lesson(session, lesson)
     session.add(lesson)
+    if evaluation.passed:
+        _touch_activity(session)
     session.commit()
 
     return {
@@ -712,6 +912,7 @@ async def submit_simulation(lesson_id: int, req: SimulationSubmitRequest, sessio
     lesson.simulation_passed = True
     check_and_unlock_lesson(session, lesson)
     session.add(lesson)
+    _touch_activity(session)
     session.commit()
 
     mod = session.get(Module, lesson.module_id)
@@ -810,6 +1011,8 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
 
         check_and_unlock_lesson(session, lesson)
         session.add(lesson)
+        if eval2.passed:
+            _touch_activity(session)
         session.commit()
 
         return {
