@@ -44,6 +44,7 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useZoom } from "@/context/ZoomContext";
 import SettingsModal from "@/components/SettingsModal";
 import LessonTutorChat from "@/components/LessonTutorChat";
+import GamificationPanel, { notifyProfileUpdated } from "@/components/GamificationPanel";
 import { translations, SupportedLanguage } from "@/lib/i18n";
 
 // Componente de Bloco de Código com Prism Syntax Highlighting e Botão de Copiar
@@ -769,6 +770,7 @@ export default function LessonPage() {
       setMcqResult(res);
       if (res.lesson_completed) {
         setLesson((prev) => (prev ? { ...prev, status: "completed" } : null));
+        notifyProfileUpdated();
       }
       if (res.mcq_passed) {
         confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
@@ -798,6 +800,7 @@ export default function LessonPage() {
       setSimPassed(true);
       if (res.lesson_completed) {
         setLesson((prev) => (prev ? { ...prev, status: "completed" } : null));
+        notifyProfileUpdated();
       }
       confetti({ particleCount: 60, spread: 65, origin: { y: 0.7 } });
     } catch {
@@ -845,6 +848,7 @@ export default function LessonPage() {
       }
       if (res.lesson_completed) {
         setLesson((prev) => (prev ? { ...prev, status: "completed" } : null));
+        notifyProfileUpdated();
       }
     } catch {
       alert(lang === "en-US" ? "Failed to submit rebuttal to Socratic Debater." : "Erro ao submeter réplica do Duelo Socrático.");
@@ -942,8 +946,9 @@ export default function LessonPage() {
           </button>
         </div>
 
-        {/* Lado Direito: Controles de Zoom + Botão de Download PDF */}
+        {/* Lado Direito: gamificação + zoom + PDF */}
         <div className="flex items-center space-x-2 sm:space-x-3">
+          <GamificationPanel compact lang={lang} />
           {/* Controles de Zoom (100% a 200%) */}
           <div 
             className="flex items-center bg-[#141416] p-1 rounded-xl border border-[#27272a] space-x-1"
@@ -1018,7 +1023,7 @@ export default function LessonPage() {
           <div className="space-y-4 border-b border-[#222226] pb-8">
             <div className="flex items-center justify-between">
               <span className="text-xs font-black uppercase tracking-widest text-[#ffe500]">
-                {lesson.module_title} • {lang === "en-US" ? "Lesson" : "Aula"} {lesson.lesson_number}
+                {lang === "en-US" ? "Current step" : "Passo atual"}
               </span>
               <span className="text-[11px] font-semibold text-neutral-400 bg-[#141416] border border-[#27272a] px-2.5 py-1 rounded-full">
                 ~{readingTimeMin} {t.lesson_reading_time} • {wordCount} {t.lesson_words}
@@ -1380,7 +1385,7 @@ export default function LessonPage() {
                   {lang === "en-US" ? "Mastery Assessment" : "Verificação de Aprendizado"}
                 </h2>
                 <p className="text-xs text-neutral-400">
-                  {lesson.module_title} • {lang === "en-US" ? "Lesson" : "Aula"} {lesson.lesson_number}
+                  {lang === "en-US" ? "Current step" : "Passo atual"}
                 </p>
               </div>
             </div>
@@ -1401,7 +1406,7 @@ export default function LessonPage() {
               <section className="bg-[#121214] border border-[#27272a] rounded-3xl p-6 sm:p-8 space-y-6 shadow-xl">
                 <div className="border-b border-[#222226] pb-4">
                   <span className="text-xs font-bold uppercase tracking-wider text-[#ffe500] block">
-                    {lang === "en-US" ? "Part 1 of 3" : "Parte 1 de 3"}
+                    {lang === "en-US" ? "Grammar gate" : "Portão da Gramática"}
                   </span>
                   <h3 className="text-xl font-black text-white mt-1">
                     {lang === "en-US" ? `Multiple Choice Questions (${quiz.mcq.length} Questions)` : `Questões de Múltipla Escolha (${quiz.mcq.length} Questões)`}
@@ -1560,7 +1565,7 @@ export default function LessonPage() {
                     <div className="flex items-center justify-between gap-4">
                       <div>
                         <span className="text-xs font-black uppercase tracking-wider text-[#ffe500] block">
-                          {lang === "en-US" ? "PART 2 OF 3" : "PARTE 2 DE 3"}
+                          {lang === "en-US" ? "LOGIC GATE" : "PORTÃO DA LÓGICA"}
                         </span>
                         <h3 className="text-xl md:text-2xl font-black text-white mt-1 tracking-tight">
                           {lang === "en-US" ? "Simulation" : "Simulação"}
@@ -1568,7 +1573,7 @@ export default function LessonPage() {
                       </div>
 
                       {/* Traços sutis de progresso das 4 etapas (0: Cenário, 1: Turno 1, 2: Turno 2, 3: Desfecho) */}
-                      <div className="flex items-center space-x-1.5 shrink-0" title={lang === "en-US" ? `Step ${simSlide + 1} of 4` : `Etapa ${simSlide + 1} de 4`}>
+                      <div className="flex items-center space-x-1.5 shrink-0" title={lang === "en-US" ? "Simulation phases" : "Fases da simulação"}>
                         {[0, 1, 2, 3].map((step) => {
                           const isCurrent = simSlide === step;
                           const isPast = simSlide > step;
@@ -1742,7 +1747,7 @@ export default function LessonPage() {
                 <section className="glass-panel rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl relative overflow-hidden">
                   <div className="border-b border-[#222226] pb-4">
                     <div className="text-xs font-black uppercase tracking-wider text-[#ffe500]">
-                      <span>{lang === "en-US" ? "PART 3 OF 3" : "PARTE 3 DE 3"}</span>
+                      <span>{lang === "en-US" ? "RHETORIC GATE" : "PORTÃO DA RETÓRICA"}</span>
                     </div>
                     <h3 className="text-xl md:text-2xl font-black text-white mt-1 tracking-tight">
                       {quiz.socratic_duel?.dilemma_title || (lang === "en-US" ? "Interactive Case Study" : "Estudo de Caso Prático")}
@@ -1911,10 +1916,13 @@ export default function LessonPage() {
                       : "Você dominou as questões objetivas, testou as consequências operacionais no Mini-Simulador e superou o Duelo Socrático. A próxima etapa está desbloqueada!"}
                   </p>
                   <button
-                    onClick={() => router.back()}
+                    onClick={() => {
+                      if (lesson.course_id) router.push(`/course/${lesson.course_id}?revealed=1`);
+                      else router.back();
+                    }}
                     className="bg-green-500 hover:bg-green-400 text-black font-black px-6 py-3 rounded-xl text-sm transition-all cursor-pointer"
                   >
-                    {lang === "en-US" ? "Return to Course Track" : "Voltar à Trilha do Curso"}
+                    {lang === "en-US" ? "Reveal the next step" : "Revelar o próximo passo"}
                   </button>
                 </div>
               )}

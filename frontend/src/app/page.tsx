@@ -1,20 +1,21 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   ArrowRight, BookOpen, Compass, ShieldCheck, MessageSquare, CheckCircle, 
   RotateCw, Settings, AlertCircle, Brain, Globe, FileText, ChevronDown, 
-  UploadCloud, Info, X 
+  UploadCloud, Info, X, Sparkles 
 } from "lucide-react";
 import { 
   createCourse, getJobStatus, getCourses, JobStatusResponse, CourseListItem,
   uploadDocument, generateCourseFromDocument, DocumentUploadResponse,
-  getCatalog, getCatalogCategories, getProfileStats, recordActivity,
-  CatalogItem, CatalogCategory, ProfileStats
+  getCatalog, getCatalogCategories, getCatalogTiers, getCatalogPersonas, getProfileStats, recordActivity,
+  CatalogItem, CatalogCategory, CatalogTier, CatalogPersona, ProfileStats
 } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import SettingsModal from "@/components/SettingsModal";
+import GamificationPanel, { notifyProfileUpdated } from "@/components/GamificationPanel";
 import { translations, SupportedLanguage, formatCourseLevel } from "@/lib/i18n";
 
 const SUGGESTIONS = [
@@ -27,6 +28,52 @@ const SUGGESTIONS = [
   "Arquitetura de Agentes de IA",
   "Neurociência & Aprendizagem"
 ];
+
+/** Domain persona switcher — the selected voice is sent to the generation pipeline. */
+function PersonaPicker({
+  personas,
+  selected,
+  onSelect,
+  lang,
+}: {
+  personas: CatalogPersona[];
+  selected: string;
+  onSelect: (id: string) => void;
+  lang: SupportedLanguage;
+}) {
+  const en = lang === "en-US";
+  const t = translations[lang];
+  const list: CatalogPersona[] = personas.length
+    ? personas
+    : [{ id: "auto", label_en: "Auto (domain AI)", label_pt: "Automática (IA do domínio)" }];
+  return (
+    <div className="p-3 bg-[#18181b] rounded-2xl border border-[#27272a] space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <span className="text-xs font-bold text-neutral-300 flex items-center space-x-1.5">
+          <Sparkles className="w-3.5 h-3.5 text-[#ffe500]" />
+          <span>{t.persona_label}:</span>
+        </span>
+        <span className="text-[10px] text-neutral-500 text-right max-w-[65%]">{t.persona_hint}</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {list.map((persona) => (
+          <button
+            key={persona.id}
+            type="button"
+            onClick={() => onSelect(persona.id)}
+            className={`px-3 py-1.5 rounded-xl text-[11px] font-extrabold border transition-all cursor-pointer ${
+              selected === persona.id
+                ? "bg-[#ffe500] text-black border-[#ffe500]"
+                : "bg-[#141416] text-neutral-300 border-[#333338] hover:border-[#ffe500]/50 hover:text-white"
+            }`}
+          >
+            {en ? persona.label_en : persona.label_pt}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function HomePage() {
   const router = useRouter();
@@ -57,6 +104,12 @@ export default function HomePage() {
   };
 
   const t = translations[uiLang];
+  const tierLabel = (id: "basic" | "working" | "mastery") =>
+    id === "basic" ? t.tier_basic : id === "working" ? t.tier_working : t.tier_mastery;
+  const tierSize = (id: string, fallbackModules: number, fallbackLessons: number) => {
+    const found = catalogTiers.find((x) => x.id === id);
+    return t.tier_size(found?.modules ?? fallbackModules, found?.lessons_per_module ?? fallbackLessons);
+  };
 
   // Modo de Criação: "web" (Pesquisa Web) ou "document" (Do seu arquivo)
   const [creationMode, setCreationMode] = useState<"web" | "document">("web");
@@ -80,19 +133,25 @@ export default function HomePage() {
   const [catalogCats, setCatalogCats] = useState<CatalogCategory[]>([]);
   const [catalogCat, setCatalogCat] = useState<string>("all");
   const [catalogQuery, setCatalogQuery] = useState<string>("");
+  const [catalogDifficulty, setCatalogDifficulty] = useState<string>("");
+  const [catalogTiers, setCatalogTiers] = useState<CatalogTier[]>([]);
+  const [personas, setPersonas] = useState<CatalogPersona[]>([]);
+  const [selectedPersona, setSelectedPersona] = useState<string>("auto");
   const [profileStats, setProfileStats] = useState<ProfileStats | null>(null);
 
-  const fetchCatalog = () => {
-    getCatalog({ category: catalogCat, q: catalogQuery || undefined })
+  const fetchCatalog = useCallback(() => {
+    getCatalog({ category: catalogCat, q: catalogQuery || undefined, difficulty: catalogDifficulty || undefined })
       .then(setCatalogItems)
       .catch(() => setCatalogItems([]));
-  };
+  }, [catalogCat, catalogQuery, catalogDifficulty]);
 
-  useEffect(() => { fetchCatalog(); }, [catalogCat]);
+  useEffect(() => { fetchCatalog(); }, [fetchCatalog]);
   useEffect(() => {
     getCatalogCategories().then(setCatalogCats).catch(() => {});
+    getCatalogTiers().then(setCatalogTiers).catch(() => {});
+    getCatalogPersonas().then(setPersonas).catch(() => {});
     getProfileStats().then(setProfileStats).catch(() => {});
-    recordActivity();
+    recordActivity().then(notifyProfileUpdated).catch(() => {});
   }, []);
 
   // Job de Esteira
@@ -162,7 +221,7 @@ export default function HomePage() {
     setIsSubmitting(true);
 
     try {
-      const res = await createCourse(subject.trim(), level, courseLang);
+      const res = await createCourse(subject.trim(), level, courseLang, selectedPersona);
       setJobId(res.job_id);
     } catch {
       alert(t.alert_pipeline_trigger_error);
@@ -202,7 +261,8 @@ export default function HomePage() {
         analyzedDoc.doc_id,
         docSubject.trim(),
         analyzedDoc.inferred_level,
-        courseLang
+        courseLang,
+        selectedPersona
       );
       setJobId(res.job_id);
     } catch (err: unknown) {
@@ -228,13 +288,11 @@ export default function HomePage() {
         </div>
         <div className="flex items-center space-x-3 text-xs font-semibold tracking-wider text-neutral-400">
           {profileStats && (
-            <div className="hidden sm:flex items-center space-x-3 bg-[#18181b] border border-[#27272a] rounded-xl px-3 py-1.5" title="XP / streak / level — earned from completed steps only">
-              <span className="text-[#ffe500] font-black">⚡ {profileStats.xp} XP</span>
-              <span>🔥 {profileStats.streak_days}</span>
-              <span>🎚 Lv {profileStats.level}</span>
-              {profileStats.reviews_due > 0 && <span className="text-amber-400">↻ {profileStats.reviews_due}</span>}
+            <div className="hidden xl:flex items-center text-xs font-semibold text-neutral-400">
+              {profileStats.reviews_due > 0 && <span className="text-amber-400">↻ {profileStats.reviews_due} {uiLang === "en-US" ? "reviews" : "revisões"}</span>}
             </div>
           )}
+          <GamificationPanel compact lang={uiLang} />
           {/* Seletor de Idioma da Interface com Bandeiras 2D */}
           <div className="flex items-center bg-[#18181b] border border-[#27272a] rounded-xl p-1 space-x-1">
             <button
@@ -559,19 +617,19 @@ export default function HomePage() {
                     />
                   </div>
 
+                  <PersonaPicker personas={personas} selected={selectedPersona} onSelect={setSelectedPersona} lang={uiLang} />
+
                   {/* Frase Transparente de Diagnóstico Cognitivo Estilo Netflix */}
                   <div className="p-4 bg-[#18181b] border border-[#27272a] rounded-xl space-y-2.5">
                     <p className="text-xs sm:text-sm text-neutral-200 leading-relaxed font-medium">
                       💡 {analyzedDoc.complexity_reason}
                     </p>
                     <p className="text-xs text-neutral-400">
-                      {t.doc_course_journey_label} <strong>{formatCourseLevel(analyzedDoc.inferred_level, uiLang)}</strong> (
-                      {analyzedDoc.inferred_level === "Avançado" || analyzedDoc.inferred_level === "Advanced"
-                        ? t.doc_modules_lessons_pattern.replace("{modules}", "12").replace("{lessons}", "60")
-                        : analyzedDoc.inferred_level === "Intermediário" || analyzedDoc.inferred_level === "Intermediate"
-                        ? t.doc_modules_lessons_pattern.replace("{modules}", "8").replace("{lessons}", "32")
-                        : t.doc_modules_lessons_pattern.replace("{modules}", "4").replace("{lessons}", "12")}
-                      ) {t.doc_course_journey_suffix}
+                      {uiLang === "en-US" ? "Built at the " : "Construído no nível "}
+                      <strong>{formatCourseLevel(analyzedDoc.inferred_level, uiLang)}</strong>
+                      {uiLang === "en-US"
+                        ? " depth — the path is revealed one step at a time."
+                        : " — o caminho é revelado um passo por vez."}
                     </p>
                     {analyzedDoc.reader_prerequisites && analyzedDoc.reader_prerequisites.length > 0 && (
                       <div className="pt-2 border-t border-[#27272a]">
@@ -646,15 +704,29 @@ export default function HomePage() {
 
         {/* Catálogo público — descoberta por categoria (sem contagens) */}
         <div className="mt-14 pt-10 border-t border-[#1f1f23]">
-          <div className="mb-5">
-            <span className="text-xs font-bold uppercase tracking-widest text-[#ffe500]">{uiLang === "en-US" ? "Discover" : "Descobrir"}</span>
-            <h3 className="text-2xl font-black text-white mt-0.5">{uiLang === "en-US" ? "Browse skills by category" : "Explorar habilidades por categoria"}</h3>
-            <p className="text-xs text-neutral-500 mt-1">{uiLang === "en-US" ? "Start a new skill. Once inside a course, the path is blind — one step at a time." : "Comece uma nova habilidade. Dentro do curso, o caminho é cego — um passo por vez."}</p>
+          <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <span className="text-xs font-bold uppercase tracking-widest text-[#ffe500]">{uiLang === "en-US" ? "Discover" : "Descobrir"}</span>
+              <h3 className="text-2xl font-black text-white mt-0.5">{uiLang === "en-US" ? "Browse skills by category" : "Explorar habilidades por categoria"}</h3>
+              <p className="text-xs text-neutral-500 mt-1">{uiLang === "en-US" ? "Start a new skill. Once inside a course, the path is blind — one step at a time." : "Comece uma nova habilidade. Dentro do curso, o caminho é cego — um passo por vez."}</p>
+            </div>
+            <GamificationPanel lang={uiLang} />
           </div>
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <button type="button" onClick={() => setCatalogCat("all")} className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${catalogCat === "all" ? "bg-[#ffe500] text-black border-[#ffe500]" : "bg-[#141416] text-neutral-300 border-[#27272a] hover:border-[#ffe500]/50"}`}>{uiLang === "en-US" ? "All" : "Todas"}</button>
             {catalogCats.map((cat) => (
               <button key={cat.id} type="button" onClick={() => setCatalogCat(cat.id)} className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${catalogCat === cat.id ? "bg-[#ffe500] text-black border-[#ffe500]" : "bg-[#141416] text-neutral-300 border-[#27272a] hover:border-[#ffe500]/50"}`}>{uiLang === "en-US" ? cat.label_en : cat.label_pt}</button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <span className="text-[10px] font-black uppercase tracking-widest text-neutral-500 mr-1">{t.difficulty_label}:</span>
+            <button type="button" onClick={() => setCatalogDifficulty("")} className={`px-3 py-1 rounded-full text-[11px] font-bold border transition-all cursor-pointer ${!catalogDifficulty ? "bg-[#ffe500] text-black border-[#ffe500]" : "bg-[#141416] text-neutral-300 border-[#27272a] hover:border-[#ffe500]/50"}`}>{t.difficulty_all}</button>
+            {catalogTiers.map((tier) => (
+              <button key={tier.id} type="button" title={t.tier_size(tier.modules, tier.lessons_per_module)}
+                onClick={() => setCatalogDifficulty(tier.id)}
+                className={`px-3 py-1 rounded-full text-[11px] font-bold border transition-all cursor-pointer ${catalogDifficulty === tier.id ? "bg-[#ffe500] text-black border-[#ffe500]" : "bg-[#141416] text-neutral-300 border-[#27272a] hover:border-[#ffe500]/50"}`}>
+                {uiLang === "en-US" ? tier.label_en : tier.label_pt}
+              </button>
             ))}
           </div>
           <div className="flex flex-col sm:flex-row gap-2 mb-5">
@@ -781,8 +853,8 @@ export default function HomePage() {
                         )}
                         <span>•</span>
                         <span>{formatCourseLevel(c.level, uiLang)}</span>
-                        {c.completed_lessons > 0 && (
-                          <span>• ✓ {c.completed_lessons} {uiLang === "en-US" ? "done" : "concluídas"}</span>
+                        {c.is_completed && (
+                          <span>• {uiLang === "en-US" ? "mastered" : "dominado"}</span>
                         )}
                       </div>
                     </div>
@@ -876,16 +948,19 @@ export default function HomePage() {
                 </div>
               </div>
 
+              <PersonaPicker personas={personas} selected={selectedPersona} onSelect={setSelectedPersona} lang={uiLang} />
+
               <div className="grid grid-cols-1 gap-3">
                 {/* Básico */}
                 <button
-                  onClick={() => handleStartCourse("Básico")}
+                  onClick={() => handleStartCourse("basic")}
                   className="group text-left p-5 rounded-2xl border-2 border-[#27272a] hover:border-[#ffe500] bg-[#18181b] hover:bg-[#1f1f23] transition-all flex justify-between items-center cursor-pointer"
                 >
                   <div>
                     <div className="flex items-center space-x-2">
                       <span className="font-black text-white group-hover:text-[#ffe500] text-base">{t.level_basic_name}</span>
-                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{t.level_basic_meta}</span>
+                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{tierLabel("basic")}</span>
+                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{tierSize("basic", 4, 3)}</span>
                     </div>
                     <p className="text-xs text-neutral-400 mt-1">{t.level_basic_desc}</p>
                   </div>
@@ -894,13 +969,14 @@ export default function HomePage() {
 
                 {/* Intermediário */}
                 <button
-                  onClick={() => handleStartCourse("Intermediário")}
+                  onClick={() => handleStartCourse("working")}
                   className="group text-left p-5 rounded-2xl border-2 border-[#27272a] hover:border-[#ffe500] bg-[#18181b] hover:bg-[#1f1f23] transition-all flex justify-between items-center cursor-pointer"
                 >
                   <div>
                     <div className="flex items-center space-x-2">
                       <span className="font-black text-white group-hover:text-[#ffe500] text-base">{t.level_inter_name}</span>
-                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{t.level_inter_meta}</span>
+                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{tierLabel("working")}</span>
+                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{tierSize("working", 8, 4)}</span>
                     </div>
                     <p className="text-xs text-neutral-400 mt-1">{t.level_inter_desc}</p>
                   </div>
@@ -909,13 +985,14 @@ export default function HomePage() {
 
                 {/* Avançado */}
                 <button
-                  onClick={() => handleStartCourse("Avançado")}
+                  onClick={() => handleStartCourse("mastery")}
                   className="group text-left p-5 rounded-2xl border-2 border-[#27272a] hover:border-[#ffe500] bg-[#18181b] hover:bg-[#1f1f23] transition-all flex justify-between items-center cursor-pointer"
                 >
                   <div>
                     <div className="flex items-center space-x-2">
                       <span className="font-black text-white group-hover:text-[#ffe500] text-base">{t.level_adv_name}</span>
-                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{t.level_adv_meta}</span>
+                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{tierLabel("mastery")}</span>
+                      <span className="bg-[#27272a] text-[10px] font-bold px-2 py-0.5 rounded text-neutral-300">{tierSize("mastery", 12, 5)}</span>
                     </div>
                     <p className="text-xs text-neutral-400 mt-1">{t.level_adv_desc}</p>
                   </div>

@@ -47,6 +47,16 @@ export const translations = {
     level_adv_name: "Avançado (Maestria)",
     level_adv_meta: "12 Módulos • 60 Aulas",
     level_adv_desc: "~2.000 palavras por aula. Casos complexos, normas técnicas e diagnóstico crítico.",
+    tier_basic: "Basic",
+    tier_working: "Working",
+    tier_mastery: "Mastery",
+    tier_size: (m: number, l: number) => `${m} módulos × ${l} aulas`,
+    persona_label: "Voz do mentor (persona)",
+    persona_hint: "Escolha como o professor conduz o curso. 'Automática' infere a melhor voz para o tema.",
+    difficulty_label: "Dificuldade",
+    difficulty_all: "Todas",
+    gamification_label: "Seu progresso",
+    citations_label: "Citações do seu material",
 
     // Modos de Criação e Upload de Arquivo
     mode_web_search: "Pesquisa web",
@@ -201,6 +211,16 @@ export const translations = {
     level_adv_name: "Advanced (Mastery)",
     level_adv_meta: "12 Modules • 60 Lessons",
     level_adv_desc: "~2,000 words per lesson. Edge cases, academic debates, and stress-tested diagnostics.",
+    tier_basic: "Basic",
+    tier_working: "Working",
+    tier_mastery: "Mastery",
+    tier_size: (m: number, l: number) => `${m} modules × ${l} lessons`,
+    persona_label: "Mentor voice (persona)",
+    persona_hint: "Pick how the teacher leads the course. 'Auto' infers the best voice for the topic.",
+    difficulty_label: "Difficulty",
+    difficulty_all: "All",
+    gamification_label: "Your progress",
+    citations_label: "Citations from your material",
 
     // Modos de Criação e Upload de Arquivo
     mode_web_search: "Web search",

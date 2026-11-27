@@ -14,7 +14,6 @@ export interface CourseListItem {
   created_at?: string;
   category?: string;
   // Fog-of-War: totals / percent-to-total are never returned by the API.
-  completed_lessons: number;
 }
 
 export interface CatalogCategory {
@@ -41,6 +40,38 @@ export interface LessonStepSummary {
   status: "locked" | "in_progress" | "completed";
 }
 
+/** Blind navigation pointer — never carries a future title or hook. */
+export interface BlindStepPointer {
+  id: number;
+  status: "locked" | "in_progress" | "completed";
+}
+
+export interface StepGates {
+  lesson_id: number;
+  grammar: boolean;
+  logic: boolean;
+  rhetoric: boolean;
+  lesson_completed: boolean;
+  current_stage: "learn" | "quiz" | "simulate" | "teach_back" | "unlock";
+  stages?: Array<{ id: string; passed: boolean; available: boolean }>;
+  has_simulation?: boolean;
+  has_discursive?: boolean;
+  has_socratic_duel?: boolean;
+  mcq?: { score: number; target: number };
+  flashcards?: { score: number; target: number };
+  socratic_round?: number;
+}
+
+/** The one step the learner is allowed to see right now. */
+export interface CurrentStepResponse {
+  id: number | null;
+  stage: StepGates["current_stage"];
+  title: string | null;
+  hook: string | null;
+  content: string | null;
+  gates: StepGates | null;
+}
+
 export interface NextStepResponse {
   course_id: number;
   subject: string;
@@ -48,7 +79,7 @@ export interface NextStepResponse {
   category: string;
   language?: string;
   fog_of_war: boolean;
-  current_step: LessonStepSummary | null;
+  current_step: BlindStepPointer | null;
   completed_lessons: LessonStepSummary[];
   is_course_complete: boolean;
 }
@@ -84,6 +115,25 @@ export interface CourseSource {
   title: string;
   url: string;
   domain: string;
+  description?: string;
+  citation?: boolean;
+  chapter_index?: number;
+  type?: string;
+}
+
+export interface CatalogTier {
+  id: string;
+  label_en: string;
+  label_pt: string;
+  modules: number;
+  lessons_per_module: number;
+  total_lessons: number;
+}
+
+export interface CatalogPersona {
+  id: string;
+  label_en: string;
+  label_pt: string;
 }
 
 export interface CourseSummary {
@@ -234,12 +284,17 @@ export interface JobStatusResponse {
   error_message?: string;
 }
 
-export async function createCourse(subject: string, level: string = "Básico", language: string = "pt-BR"): Promise<{ job_id: string }> {
+export async function createCourse(
+  subject: string,
+  level: string = "Básico",
+  language: string = "pt-BR",
+  persona: string = "auto"
+): Promise<{ job_id: string }> {
   try {
     const res = await fetch(`${API_BASE_URL}/api/courses/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subject, level, language }),
+      body: JSON.stringify({ subject, level, language, persona }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: "Falha ao iniciar criação do curso" }));
@@ -278,6 +333,18 @@ export async function getCatalogCategories(): Promise<CatalogCategory[]> {
   return res.json();
 }
 
+export async function getCatalogTiers(): Promise<CatalogTier[]> {
+  const res = await fetch(`${API_BASE_URL}/api/catalog/tiers`);
+  if (!res.ok) throw new Error("Falha ao carregar níveis de geração");
+  return res.json();
+}
+
+export async function getCatalogPersonas(): Promise<CatalogPersona[]> {
+  const res = await fetch(`${API_BASE_URL}/api/catalog/personas`);
+  if (!res.ok) throw new Error("Falha ao carregar personas");
+  return res.json();
+}
+
 export async function getCatalog(params?: { category?: string; q?: string; difficulty?: string }): Promise<CatalogItem[]> {
   const qs = new URLSearchParams();
   if (params?.category) qs.set("category", params.category);
@@ -292,6 +359,12 @@ export async function getCatalog(params?: { category?: string; q?: string; diffi
 export async function getNextStep(courseId: number): Promise<NextStepResponse> {
   const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/next-step`);
   if (!res.ok) throw new Error("Falha ao carregar próximo passo");
+  return res.json();
+}
+
+export async function getCurrentStep(courseId: number): Promise<CurrentStepResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/current-step`);
+  if (!res.ok) throw new Error("Falha ao carregar passo atual");
   return res.json();
 }
 
@@ -594,13 +667,14 @@ export async function generateCourseFromDocument(
   docId: string,
   subject?: string,
   level?: string,
-  language: string = "pt-BR"
+  language: string = "pt-BR",
+  persona: string = "auto"
 ): Promise<{ job_id: string; status: string; message: string }> {
   try {
     const res = await fetch(`${API_BASE_URL}/api/courses/generate-from-document`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ doc_id: docId, subject, level, language }),
+      body: JSON.stringify({ doc_id: docId, subject, level, language, persona }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: "Falha ao iniciar geração a partir do documento" }));

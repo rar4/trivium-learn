@@ -17,6 +17,26 @@ spaced repetition, and a mastery certificate.
 | Certificate | `GET /api/courses/{id}/certificate` | Unlocks only when every step is completed; returns a share URL. |
 | UI | `frontend/src/app/page.tsx`, `frontend/src/app/course/[id]/page.tsx` | Catalog section with category chips + search, gamification chip in the header, course page rewritten as a single blind "current step" card + mastered-steps review list. No roadmap, no counts, no SkillTree. |
 
+### Generation tiers, personas and retention UI
+
+- **Tiers:** `/api/catalog/tiers` publishes the exact contract Basic 4×3 (12),
+  Working 8×4 (32), Mastery 12×5 (60). The home level picker sends the tier id
+  (`basic`/`working`/`mastery`); the API resolves it to a canonical level before
+  the orchestrator reads `LEVEL_SPECS`, so English and Portuguese sessions get
+  the same course size. `backend/tests/test_catalog_tiers.py` pins the sizes,
+  aliases, personas and upload citations (8 tests).
+- **Personas:** `/api/catalog/personas` exposes `auto`, `practitioner`,
+  `socratic`, `storyteller`, `rigorist`. The picker is available in both web and
+  upload modes and the chosen voice overrides the AI-inferred mentor profile.
+- **Retention UI:** XP / level ring / streak / badges render in the header of
+  home, course and lesson pages; passing a gate fires `notifyProfileUpdated()`
+  so the panel refreshes immediately. Confetti fires on MCQ, simulation and
+  Socratic passes. Chapter-level citations from uploaded PDF/EPUB render as
+  non-link source chips with page ranges.
+- **Blind step:** the course page reads `/api/courses/{id}/current-step` (title,
+  hook, stage) instead of the blind `/next-step` pointer, so the single revealed
+  card has content without exposing future steps.
+
 Engine files intentionally **not modified**: `backend/app/agents/pipeline.py`,
 `backend/app/services/researcher.py`, `backend/app/schemas/curriculum.py`,
 `backend/app/schemas/quiz.py`, `backend/app/graph/orchestrator.py`.
