@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { Flame, Sparkles, Trophy, Zap } from "lucide-react";
-import { getProfileStats, ProfileStats } from "@/lib/api";
+import { AUTH_CHANGED_EVENT, getProfileStats, ProfileStats } from "@/lib/api";
 
 /**
  * Retention layer: XP, streak, level ring and badges.
@@ -42,9 +42,11 @@ export default function GamificationPanel({ lang = "pt-BR", compact = false, cla
   useEffect(() => {
     refresh();
     window.addEventListener(PROFILE_UPDATED_EVENT, refresh);
+    window.addEventListener(AUTH_CHANGED_EVENT, refresh);
     window.addEventListener("focus", refresh);
     return () => {
       window.removeEventListener(PROFILE_UPDATED_EVENT, refresh);
+      window.removeEventListener(AUTH_CHANGED_EVENT, refresh);
       window.removeEventListener("focus", refresh);
     };
   }, [refresh]);

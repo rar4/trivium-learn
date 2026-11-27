@@ -1,5 +1,44 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/** Bearer token shared by every API call; no token means the legacy local learner. */
+const TOKEN_KEY = "trivium_token";
+export const AUTH_CHANGED_EVENT = "trivium:auth-changed";
+
+export interface AuthUser {
+  id: number;
+  username: string;
+  display_name: string;
+  email?: string | null;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: AuthUser;
+}
+
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function setAuthToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  if (token) window.localStorage.setItem(TOKEN_KEY, token);
+  else window.localStorage.removeItem(TOKEN_KEY);
+  window.dispatchEvent(new CustomEvent(AUTH_CHANGED_EVENT));
+}
+
+/** Every backend request carries the active account's bearer token. */
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers || undefined);
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  if (res.status === 401 && token) setAuthToken(null);
+  return res;
+}
+
+
 export interface CourseListItem {
   id: number;
   subject: string;
@@ -291,7 +330,7 @@ export async function createCourse(
   persona: string = "auto"
 ): Promise<{ job_id: string }> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/courses/generate`, {
+    const res = await apiFetch(`/api/courses/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ subject, level, language, persona }),
@@ -310,37 +349,37 @@ export async function createCourse(
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}`);
+  const res = await apiFetch(`/api/jobs/${jobId}`);
   if (!res.ok) throw new Error("Falha ao consultar status do job");
   return res.json();
 }
 
 export async function getCourses(): Promise<CourseListItem[]> {
-  const res = await fetch(`${API_BASE_URL}/api/courses`);
+  const res = await apiFetch(`/api/courses`);
   if (!res.ok) throw new Error("Falha ao listar cursos");
   return res.json();
 }
 
 export async function getCourse(courseId: number): Promise<CourseSummary> {
-  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}`);
+  const res = await apiFetch(`/api/courses/${courseId}`);
   if (!res.ok) throw new Error("Falha ao carregar curso");
   return res.json();
 }
 
 export async function getCatalogCategories(): Promise<CatalogCategory[]> {
-  const res = await fetch(`${API_BASE_URL}/api/catalog/categories`);
+  const res = await apiFetch(`/api/catalog/categories`);
   if (!res.ok) throw new Error("Falha ao carregar categorias");
   return res.json();
 }
 
 export async function getCatalogTiers(): Promise<CatalogTier[]> {
-  const res = await fetch(`${API_BASE_URL}/api/catalog/tiers`);
+  const res = await apiFetch(`/api/catalog/tiers`);
   if (!res.ok) throw new Error("Falha ao carregar níveis de geração");
   return res.json();
 }
 
 export async function getCatalogPersonas(): Promise<CatalogPersona[]> {
-  const res = await fetch(`${API_BASE_URL}/api/catalog/personas`);
+  const res = await apiFetch(`/api/catalog/personas`);
   if (!res.ok) throw new Error("Falha ao carregar personas");
   return res.json();
 }
@@ -351,49 +390,49 @@ export async function getCatalog(params?: { category?: string; q?: string; diffi
   if (params?.q) qs.set("q", params.q);
   if (params?.difficulty) qs.set("difficulty", params.difficulty);
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
-  const res = await fetch(`${API_BASE_URL}/api/catalog${suffix}`);
+  const res = await apiFetch(`/api/catalog${suffix}`);
   if (!res.ok) throw new Error("Falha ao carregar catálogo");
   return res.json();
 }
 
 export async function getNextStep(courseId: number): Promise<NextStepResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/next-step`);
+  const res = await apiFetch(`/api/courses/${courseId}/next-step`);
   if (!res.ok) throw new Error("Falha ao carregar próximo passo");
   return res.json();
 }
 
 export async function getCurrentStep(courseId: number): Promise<CurrentStepResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/current-step`);
+  const res = await apiFetch(`/api/courses/${courseId}/current-step`);
   if (!res.ok) throw new Error("Falha ao carregar passo atual");
   return res.json();
 }
 
 export async function getLessonGates(lessonId: number): Promise<LessonGates> {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/gates`);
+  const res = await apiFetch(`/api/lessons/${lessonId}/gates`);
   if (!res.ok) throw new Error("Falha ao carregar gates");
   return res.json();
 }
 
 export async function getProfileStats(): Promise<ProfileStats> {
-  const res = await fetch(`${API_BASE_URL}/api/profile/stats`);
+  const res = await apiFetch(`/api/profile/stats`);
   if (!res.ok) throw new Error("Falha ao carregar perfil");
   return res.json();
 }
 
 export async function recordActivity(): Promise<void> {
   try {
-    await fetch(`${API_BASE_URL}/api/profile/activity`, { method: "POST" });
+    await apiFetch(`/api/profile/activity`, { method: "POST" });
   } catch { /* best-effort streak */ }
 }
 
 export async function getCertificate(courseId: number): Promise<CertificateData> {
-  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/certificate`);
+  const res = await apiFetch(`/api/courses/${courseId}/certificate`);
   if (!res.ok) throw new Error("Certificado ainda não disponível");
   return res.json();
 }
 
 export async function getLesson(lessonId: number): Promise<LessonFullDetail> {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}`);
+  const res = await apiFetch(`/api/lessons/${lessonId}`);
   if (!res.ok) throw new Error("Falha ao carregar detalhes da aula");
   return res.json();
 }
@@ -403,7 +442,7 @@ export async function submitQuiz(
   answers: Record<string, string>,
   blanks: Record<string, string>
 ) {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/submit-quiz`, {
+  const res = await apiFetch(`/api/lessons/${lessonId}/submit-quiz`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ lesson_id: lessonId, answers, blanks }),
@@ -413,7 +452,7 @@ export async function submitQuiz(
 }
 
 export async function submitDiscursive(lessonId: number, answer: string) {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/submit-discursive`, {
+  const res = await apiFetch(`/api/lessons/${lessonId}/submit-discursive`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ lesson_id: lessonId, answer }),
@@ -428,7 +467,7 @@ export async function submitSimulation(
   turn2Id: string,
   isSuccess: boolean = true
 ) {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/submit-simulation`, {
+  const res = await apiFetch(`/api/lessons/${lessonId}/submit-simulation`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ turn1_id: turn1Id, turn2_id: turn2Id, is_success: isSuccess }),
@@ -442,7 +481,7 @@ export async function submitSocraticDuel(
   round: number,
   answer: string
 ) {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/socratic-duel`, {
+  const res = await apiFetch(`/api/lessons/${lessonId}/socratic-duel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ round, answer }),
@@ -456,7 +495,7 @@ export function getLessonPdfUrl(lessonId: number): string {
 }
 
 export async function deleteCourse(courseId: number): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}`, {
+  const res = await apiFetch(`/api/courses/${courseId}`, {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -526,7 +565,7 @@ export interface LocalConnectionTestResult {
 }
 
 export async function testLocalConnection(baseUrl?: string, apiKey?: string): Promise<LocalConnectionTestResult> {
-  const res = await fetch(`${API_BASE_URL}/api/settings/test-local-connection`, {
+  const res = await apiFetch(`/api/settings/test-local-connection`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
@@ -539,13 +578,13 @@ export async function testLocalConnection(baseUrl?: string, apiKey?: string): Pr
 }
 
 export async function getSettings(): Promise<SettingsData> {
-  const res = await fetch(`${API_BASE_URL}/api/settings`);
+  const res = await apiFetch(`/api/settings`);
   if (!res.ok) throw new Error("Falha ao carregar configurações");
   return res.json();
 }
 
 export async function updateSettings(data: SettingsUpdateData): Promise<SettingsData> {
-  const res = await fetch(`${API_BASE_URL}/api/settings`, {
+  const res = await apiFetch(`/api/settings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -577,7 +616,7 @@ export interface BenchmarkResult {
 }
 
 export async function runFreeModelsBenchmark(): Promise<BenchmarkResult> {
-  const res = await fetch(`${API_BASE_URL}/api/settings/benchmark-free-models`, {
+  const res = await apiFetch(`/api/settings/benchmark-free-models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
@@ -596,13 +635,13 @@ export interface LessonChatMessageItem {
 }
 
 export async function getLessonChatHistory(lessonId: number): Promise<LessonChatMessageItem[]> {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/chat`);
+  const res = await apiFetch(`/api/lessons/${lessonId}/chat`);
   if (!res.ok) throw new Error("Falha ao carregar histórico do chat");
   return res.json();
 }
 
 export async function sendLessonChatMessage(lessonId: number, message: string): Promise<LessonChatMessageItem> {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/chat`, {
+  const res = await apiFetch(`/api/lessons/${lessonId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
@@ -615,7 +654,7 @@ export async function sendLessonChatMessage(lessonId: number, message: string): 
 }
 
 export async function clearLessonChatHistory(lessonId: number): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE_URL}/api/lessons/${lessonId}/chat`, {
+  const res = await apiFetch(`/api/lessons/${lessonId}/chat`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Falha ao limpar histórico do chat");
@@ -626,7 +665,7 @@ export async function updateCourseAccessMode(
   courseId: number, 
   accessMode: "open" | "guided"
 ): Promise<{ success: boolean; access_mode: "open" | "guided" }> {
-  const res = await fetch(`${API_BASE_URL}/api/courses/${courseId}/access-mode`, {
+  const res = await apiFetch(`/api/courses/${courseId}/access-mode`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ access_mode: accessMode }),
@@ -652,7 +691,7 @@ export interface DocumentUploadResponse {
 export async function uploadDocument(file: File): Promise<DocumentUploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(`${API_BASE_URL}/api/courses/upload-document`, {
+  const res = await apiFetch(`/api/courses/upload-document`, {
     method: "POST",
     body: formData,
   });
@@ -671,7 +710,7 @@ export async function generateCourseFromDocument(
   persona: string = "auto"
 ): Promise<{ job_id: string; status: string; message: string }> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/courses/generate-from-document`, {
+    const res = await apiFetch(`/api/courses/generate-from-document`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ doc_id: docId, subject, level, language, persona }),
@@ -688,6 +727,107 @@ export async function generateCourseFromDocument(
     throw err;
   }
 }
+
+/* ------------------------ accounts / progress ------------------------ */
+
+async function parseAuthResponse(res: Response): Promise<AuthResponse> {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || "Authentication failed");
+  return data as AuthResponse;
+}
+
+export async function registerUser(
+  username: string,
+  password: string,
+  displayName?: string,
+  email?: string
+): Promise<AuthResponse> {
+  return parseAuthResponse(await apiFetch(`/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, display_name: displayName, email }),
+  }));
+}
+
+export async function loginUser(username: string, password: string): Promise<AuthResponse> {
+  return parseAuthResponse(await apiFetch(`/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }));
+}
+
+export async function logoutUser(): Promise<void> {
+  try { await apiFetch(`/api/auth/logout`, { method: "POST" }); } catch { /* best effort */ }
+  setAuthToken(null);
+}
+
+export async function getAuthMe(): Promise<AuthUser> {
+  const res = await apiFetch(`/api/auth/me`);
+  if (!res.ok) throw new Error("Not signed in");
+  return res.json();
+}
+
+export interface ReviewItem {
+  id: number;
+  lesson_id: number;
+  item_key: string | null;
+  kind: string | null;
+  prompt: string | null;
+  expected: string | null;
+  due_on: string;
+  interval_days: number;
+  misses: number;
+}
+
+/** Only already-mastered work plus items that are due for review. */
+export interface MasteryDashboard {
+  display_name: string;
+  xp: number;
+  level: number;
+  reviewable_items: ReviewItem[];
+  mastered_by_skill: Array<{
+    category: string;
+    mastered_items: Array<{
+      id: number;
+      title: string;
+      core_concept: string;
+      course: string | null;
+      completed_on: string | null;
+    }>;
+  }>;
+}
+
+export async function getMasteryDashboard(): Promise<MasteryDashboard> {
+  const res = await apiFetch(`/api/dashboard/mastery`);
+  if (!res.ok) throw new Error("Não foi possível carregar o painel de domínio");
+  return res.json();
+}
+
+export async function completeReview(itemId: number, passed: boolean): Promise<{ next_due_on: string }> {
+  const res = await apiFetch(`/api/reviews/${itemId}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passed }),
+  });
+  if (!res.ok) throw new Error("Falha ao registrar revisão");
+  return res.json();
+}
+
+/** Authenticated PDF download (bearer token cannot travel in an <a href>). */
+export async function downloadLessonPdf(lessonId: number): Promise<void> {
+  const res = await apiFetch(`/api/lessons/${lessonId}/download-pdf`);
+  if (!res.ok) throw new Error("Falha ao baixar o PDF da aula");
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `trivium-lesson-${lessonId}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 
 
 

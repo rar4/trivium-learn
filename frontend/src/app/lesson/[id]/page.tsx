@@ -7,7 +7,7 @@ import {
   submitQuiz, 
   submitSimulation, 
   submitSocraticDuel, 
-  getLessonPdfUrl, 
+  downloadLessonPdf, 
   LessonFullDetail,
   IndicatorState,
   SimulationTurn1Option,
@@ -986,16 +986,15 @@ export default function LessonPage() {
             </button>
           </div>
 
-          <a
-            href={getLessonPdfUrl(lesson.id)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center space-x-2 bg-[#18181b] hover:bg-[#222226] border border-[#2e2e33] text-white px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-sm"
+          <button
+            type="button"
+            onClick={() => downloadLessonPdf(lesson.id).catch(() => {})}
+            className="flex items-center space-x-2 bg-[#18181b] hover:bg-[#222226] border border-[#2e2e33] text-white px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
             title="PDF"
           >
             <Download className="w-3.5 h-3.5 text-[#ffe500]" />
             <span className="hidden sm:inline">{t.lesson_btn_download_pdf}</span>
-          </a>
+          </button>
 
           <button
             onClick={() => setShowSettingsModal(true)}
