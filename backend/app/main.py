@@ -4,7 +4,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, UploadFile, File, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, UploadFile, File, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +15,7 @@ import logging
 from app.database import init_db, get_session, engine
 from app.models.entities import Course, Module, Lesson, GenerationJob, LessonChatMessage, LearnerProfile, ReviewItem
 from app.services import catalog as _catalog
+from app.services import progression as _progression
 from datetime import date, timedelta
 from app.graph.orchestrator import CourseOrchestrator
 from app.agents.pipeline import GraderAgent, normalize_level
@@ -190,8 +191,9 @@ async def benchmark_free_models():
 
 class CourseCreateRequest(BaseModel):
     subject: str
-    level: str = "Básico" # Básico, Intermediário, Avançado
+    level: str = "Básico" # tier id (basic/working/mastery) or Básico/Intermediário/Avançado
     language: str = "pt-BR" # pt-BR, en-US
+    persona: str = "auto" # auto | practitioner | socratic | storyteller | rigorist
 
 class SimulationSubmitRequest(BaseModel):
     turn1_id: str
@@ -216,6 +218,7 @@ class DocumentGenerateRequest(BaseModel):
     subject: Optional[str] = None
     level: Optional[str] = None
     language: str = "pt-BR"
+    persona: str = "auto"
 
 @app.post("/api/courses/upload-document")
 async def upload_document(file: UploadFile = File(...)):
@@ -308,7 +311,8 @@ async def generate_course_from_document(
 
     final_subject = (req.subject or doc_data.get("clean_title") or doc_data.get("raw_filename")).strip()
     raw_level = req.level or doc_data.get("inferred_level") or "Básico"
-    final_level = normalize_level(raw_level, req.language)
+    final_level = _catalog.resolve_level(raw_level, req.language)
+    final_level = normalize_level(final_level, req.language)
 
     job_id = f"job_{uuid.uuid4().hex[:10]}"
     job = GenerationJob(
@@ -330,7 +334,8 @@ async def generate_course_from_document(
         source_type="document",
         book_filename=doc_data.get("clean_title") or doc_data.get("raw_filename"),
         book_pages=doc_data.get("total_pages"),
-        chapter_chunks=doc_data.get("chunks", [])
+        chapter_chunks=doc_data.get("chunks", []),
+        persona=getattr(req, "persona", "auto")
     )
 
     return {
@@ -341,7 +346,7 @@ async def generate_course_from_document(
 
 @app.post("/api/courses/generate")
 async def generate_course(req: CourseCreateRequest, bg: BackgroundTasks, session: Session = Depends(get_session)):
-    req.level = normalize_level(req.level, req.language)
+    req.level = normalize_level(_catalog.resolve_level(req.level, req.language), req.language)
     job_id = f"job_{uuid.uuid4().hex[:10]}"
     job = GenerationJob(
         id=job_id,
@@ -352,8 +357,11 @@ async def generate_course(req: CourseCreateRequest, bg: BackgroundTasks, session
     session.add(job)
     session.commit()
 
-    # Dispara LangGraph em background
-    bg.add_task(CourseOrchestrator.run_pipeline, job_id, req.subject, req.level, req.language)
+    # Dispara LangGraph em background (tier + persona are part of the job contract)
+    bg.add_task(
+        CourseOrchestrator.run_pipeline, job_id, req.subject, req.level, req.language,
+        persona=req.persona or "auto",
+    )
 
     return {
         "job_id": job_id,
@@ -376,7 +384,8 @@ def get_job_status(job_id: str, session: Session = Depends(get_session)):
     }
 
 @app.get("/api/courses")
-def list_courses(session: Session = Depends(get_session)):
+def list_courses(session: Session = Depends(get_session),
+                 suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     courses = session.exec(select(Course).order_by(Course.id.desc())).all()
     results = []
     for c in courses:
@@ -397,9 +406,10 @@ def list_courses(session: Session = Depends(get_session)):
             "source_book_pages": getattr(c, "source_book_pages", None),
             "category": _catalog.classify_category(c.subject),
             # Fog-of-War: totals and percent-to-total are never exposed.
-            "completed_lessons": len(completed_lessons)
+            "completed_lessons": len(completed_lessons),
         })
-    return results
+    # ``suppress_counts`` defaults to True on every list/catalog endpoint.
+    return _progression.strip_counts(results, suppress_counts)
 
 @app.get("/api/courses/{course_id}")
 def get_course_details(course_id: int, session: Session = Depends(get_session)):
@@ -423,7 +433,7 @@ def get_course_details(course_id: int, session: Session = Depends(get_session)):
             "lessons": [_lesson_summary(cur_lesson)],
         })
 
-    return {
+    payload = {
         "id": course.id,
         "subject": course.subject,
         "level": course.level,
@@ -441,6 +451,24 @@ def get_course_details(course_id: int, session: Session = Depends(get_session)):
         "completed_lessons": completed,
         "next_step": _lesson_summary(current_pair[1]) if current_pair else None,
     }
+    return _progression.strip_counts(payload)
+
+@app.get("/api/courses/{course_id}/current-step")
+def course_current_step(course_id: int, session: Session = Depends(get_session)):
+    """Fog-of-War single-step endpoint.
+
+    Returns ONLY the currently revealed step: id, stage, title, hook, content
+    and its gates. Never a list, never a future title, never a count. Past
+    steps stay reviewable through ``GET /api/lessons/{id}``.
+    """
+    course = session.get(Course, course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    ordered = _ordered_lessons(session, course_id)
+    current = next((l for _, l in ordered if l.status != "completed"), None)
+    if current is not None and current.status == "locked":
+        current = None
+    return _progression.current_step_payload(current)
 
 class CourseAccessModeRequest(BaseModel):
     access_mode: str # "open" ou "guided"
@@ -521,7 +549,8 @@ def delete_course(course_id: int, session: Session = Depends(get_session)):
     }
 
 @app.get("/api/lessons/{lesson_id}")
-def get_lesson(lesson_id: int, session: Session = Depends(get_session)):
+def get_lesson(lesson_id: int, session: Session = Depends(get_session),
+               suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula nao encontrada")
@@ -533,7 +562,8 @@ def get_lesson(lesson_id: int, session: Session = Depends(get_session)):
     course = session.get(Course, mod.course_id) if mod else None
     quiz_data = json.loads(lesson.quiz_json) if lesson.quiz_json else None
     
-    return {
+    # Fog-of-War: ordinals ("Lesson X of Y") and totals never leave the API.
+    return _progression.strip_counts({
         "id": lesson.id,
         "course_id": mod.course_id if mod else None,
         "language": getattr(course, "language", "pt-BR") or "pt-BR" if course else "pt-BR",
@@ -552,7 +582,7 @@ def get_lesson(lesson_id: int, session: Session = Depends(get_session)):
         "simulation_passed": lesson.simulation_passed,
         "socratic_passed": lesson.socratic_passed,
         "socratic_state": json.loads(lesson.socratic_state_json) if lesson.socratic_state_json else None
-    }
+    }, suppress_counts)
 
 def check_and_unlock_lesson(session: Session, lesson: Lesson):
     """
@@ -562,13 +592,11 @@ def check_and_unlock_lesson(session: Session, lesson: Lesson):
     - Se a aula possuir Duelo Socrático: socratic_passed == True (ou discursive_passed para legado)
     Se aprovado, marca a aula como completed e desbloqueia a próxima aula ou o próximo módulo.
     """
-    quiz_data = json.loads(lesson.quiz_json) if lesson.quiz_json else {}
+    quiz_data = _progression.quiz_data(lesson)
     has_sim = bool(quiz_data.get("simulation"))
     has_soc = bool(quiz_data.get("socratic_duel"))
-    total_mcqs = len(quiz_data.get("mcq", []))
-    min_mcq_required = 2 if total_mcqs <= 3 else 3
-
-    mcq_ok = (lesson.mcq_score is not None and lesson.mcq_score >= min_mcq_required)
+    # Grammar gate now includes flashcard/fill-in-the-blank retrieval practice.
+    mcq_ok = _progression.grammar_passed(lesson)
     sim_ok = lesson.simulation_passed if has_sim else True
     soc_ok = lesson.socratic_passed if has_soc else (lesson.discursive_passed or False)
 
@@ -628,6 +656,15 @@ def _ordered_lessons(session: Session, course_id: int):
 def _lesson_summary(l: Lesson):
     return {"id": l.id, "title": l.title, "core_concept": l.core_concept, "status": l.status}
 
+
+def _blind_step(l: Lesson):
+    """Navigation pointer only: never a future title or concept.
+
+    The revealed step's title/hook/content belong to ``/current-step``; a
+    list-style pointer must not disclose them (Fog-of-War).
+    """
+    return {"id": l.id, "status": l.status} if l else None
+
 def _now_utc():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc)
@@ -651,16 +688,24 @@ def _touch_activity(session: Session):
     return profile
 
 def _gates_for(lesson: Lesson):
-    quiz_data = json.loads(lesson.quiz_json) if lesson.quiz_json else {}
-    has_sim = bool(quiz_data.get("simulation"))
-    has_soc = bool(quiz_data.get("socratic_duel"))
-    total_mcqs = len(quiz_data.get("mcq", []))
-    min_mcq = 2 if total_mcqs <= 3 else 3
-    grammar = lesson.mcq_score is not None and lesson.mcq_score >= min_mcq
-    logic = lesson.simulation_passed if has_sim else (lesson.discursive_passed or False)
-    rhetoric = lesson.socratic_passed if has_soc else (lesson.discursive_passed or False)
-    return {"grammar": bool(grammar), "logic": bool(logic), "rhetoric": bool(rhetoric),
-            "lesson_completed": lesson.status == "completed"}
+    """Compatibility view of the gate booleans (single source: progression)."""
+    state = _progression.gate_state(lesson)
+    return {"grammar": state["grammar"], "logic": state["logic"],
+            "rhetoric": state["rhetoric"], "lesson_completed": state["lesson_completed"]}
+
+
+def _require_revealed(lesson: Lesson):
+    """Locked lessons leak nothing and accept no gate submissions."""
+    if lesson.status == "locked":
+        raise HTTPException(status_code=403, detail="Lesson not yet revealed. Complete the current step first.")
+
+
+def _require_stage(lesson: Lesson, stage: str):
+    """Enforce Learn -> Quiz -> Simulate -> Teach-back -> Unlock ordering."""
+    state = _progression.gate_state(lesson)
+    if not _progression.can_attempt(state, stage):
+        raise HTTPException(status_code=409, detail=_progression.stage_error(stage))
+    return state
 
 def _completed_count(session: Session) -> int:
     return len(session.exec(select(Lesson).where(Lesson.status == "completed")).all())
@@ -669,9 +714,21 @@ def _completed_count(session: Session) -> int:
 def catalog_categories():
     return [{"id": c["id"], "label_en": c["label_en"], "label_pt": c["label_pt"]} for c in _catalog.CATEGORIES]
 
+@app.get("/api/catalog/tiers")
+def catalog_tiers():
+    """AI generation tiers: Basic 4x3, Working 8x4, Mastery 12x5."""
+    return _catalog.tiers_payload()
+
+@app.get("/api/catalog/personas")
+def catalog_personas():
+    """Selectable domain personas for course generation."""
+    from app.services.domain_classifier import DomainClassifier
+    return DomainClassifier.personas_payload()
+
 @app.get("/api/catalog")
 def get_catalog(category: Optional[str] = None, q: Optional[str] = None, difficulty: Optional[str] = None,
-                session: Session = Depends(get_session)):
+                session: Session = Depends(get_session),
+                suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     """Discovery-only listing: category / difficulty / topic. NEVER counts or totals."""
     courses = session.exec(select(Course).order_by(Course.id.desc())).all()
     out = []
@@ -679,18 +736,12 @@ def get_catalog(category: Optional[str] = None, q: Optional[str] = None, difficu
         cat = _catalog.classify_category(c.subject)
         if category and category != "all" and cat != category:
             continue
-        if difficulty and difficulty.lower() not in (c.level or "").lower():
+        if difficulty and not _catalog.level_matches_difficulty(c.level or "", difficulty):
             continue
         if q and q.lower() not in (c.subject or "").lower():
             continue
-        out.append({
-            "id": c.id, "subject": c.subject, "level": c.level, "category": cat,
-            "language": getattr(c, "language", "pt-BR") or "pt-BR",
-            "cover_image_url": c.cover_image_url,
-            "source_type": getattr(c, "source_type", "web") or "web",
-            "created_at": c.created_at.isoformat() if c.created_at else None,
-        })
-    return out
+        out.append(_progression.catalog_card(c, cat))
+    return _progression.strip_counts(out, suppress_counts)
 
 @app.get("/api/profile")
 def get_profile(session: Session = Depends(get_session)):
@@ -760,7 +811,8 @@ def lesson_gates(lesson_id: int, session: Session = Depends(get_session)):
     return {"lesson_id": lesson.id, **_gates_for(lesson)}
 
 @app.get("/api/courses/{course_id}/next-step")
-def course_next_step(course_id: int, session: Session = Depends(get_session)):
+def course_next_step(course_id: int, session: Session = Depends(get_session),
+                     suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     """Fog-of-War: ONLY the current step + already-completed steps are returned."""
     course = session.get(Course, course_id)
     if not course:
@@ -770,15 +822,16 @@ def course_next_step(course_id: int, session: Session = Depends(get_session)):
     current = next((l for _, l in ordered if l.status != "completed"), None)
     if current is not None and current.status == "locked":
         current = None
-    return {
+    payload = {
         "course_id": course.id, "subject": course.subject, "level": course.level,
         "category": _catalog.classify_category(course.subject),
         "language": getattr(course, "language", "pt-BR") or "pt-BR",
         "fog_of_war": True,
-        "current_step": _lesson_summary(current) if current else None,
+        "current_step": _blind_step(current),
         "completed_lessons": completed,
         "is_course_complete": bool(ordered) and current is None,
     }
+    return _progression.strip_counts(payload, suppress_counts)
 
 @app.get("/api/courses/{course_id}/certificate")
 def course_certificate(course_id: int, session: Session = Depends(get_session)):
@@ -802,6 +855,8 @@ async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = 
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz nao encontrado")
+    _require_revealed(lesson)
+    _require_stage(lesson, "quiz")
     
     quiz = json.loads(lesson.quiz_json)
     
@@ -867,6 +922,8 @@ async def submit_discursive(lesson_id: int, req: DiscursiveSubmitRequest, sessio
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz nao encontrado")
+    _require_revealed(lesson)
+    _require_stage(lesson, "simulate")  # Logic gate: Grammar must pass first
 
     quiz = json.loads(lesson.quiz_json)
     disc = quiz.get("discursive", {})
@@ -908,6 +965,8 @@ async def submit_simulation(lesson_id: int, req: SimulationSubmitRequest, sessio
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz não encontrado")
+    _require_revealed(lesson)
+    _require_stage(lesson, "simulate")  # Logic gate: Grammar must pass first
 
     lesson.simulation_passed = True
     check_and_unlock_lesson(session, lesson)
@@ -933,6 +992,8 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz não encontrado")
+    _require_revealed(lesson)
+    _require_stage(lesson, "teach_back")  # Rhetoric gate: Grammar + Logic first
 
     quiz = json.loads(lesson.quiz_json)
     soc = quiz.get("socratic_duel") or quiz.get("discursive") or {}
@@ -984,6 +1045,8 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
             }
 
     elif req.round == 2:
+        if not state.get("round1_answer") or int(state.get("current_round") or 0) < 2:
+            raise HTTPException(status_code=409, detail="Pass Socratic round 1 before attempting round 2.")
         round1_answer = state.get("round1_answer", "")
         cognitive_knot = state.get("cognitive_knot", "")
 
@@ -1033,6 +1096,7 @@ async def download_pdf(lesson_id: int, session: Session = Depends(get_session)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.content_markdown:
         raise HTTPException(status_code=404, detail="Conteudo da aula nao encontrado")
+    _require_revealed(lesson)  # a locked lesson's PDF would leak its content
 
     mod = session.get(Module, lesson.module_id)
     mod_title = f"Modulo {mod.module_number}: {mod.title}" if mod else "Apostila de Aula"
@@ -1065,6 +1129,7 @@ def get_lesson_chat_history(lesson_id: int, session: Session = Depends(get_sessi
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula não encontrada")
+    _require_revealed(lesson)
     
     messages = session.exec(
         select(LessonChatMessage)
@@ -1097,6 +1162,7 @@ async def send_lesson_chat_message(
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula não encontrada")
+    _require_revealed(lesson)
 
     mod = session.get(Module, lesson.module_id)
     course = session.get(Course, mod.course_id) if mod else None
@@ -1157,6 +1223,7 @@ def clear_lesson_chat_history(lesson_id: int, session: Session = Depends(get_ses
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula não encontrada")
+    _require_revealed(lesson)
 
     session.exec(delete(LessonChatMessage).where(LessonChatMessage.lesson_id == lesson_id))
     session.commit()

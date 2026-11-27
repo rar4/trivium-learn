@@ -23,8 +23,54 @@ class DomainClassifier:
         "case_study_format": "História real ou dilema prático que ilustra de forma fascinante o conceito em ação no cotidiano."
     }
 
+    # Domain persona switching: 'auto' lets the AI infer one from the topic;
+    # the other presets force a distinct pedagogical voice across the course.
+    PERSONAS: Dict[str, Dict[str, Any]] = {
+        "auto": {
+            "label_en": "Auto (domain AI)", "label_pt": "Automática (IA do domínio)",
+            "persona_title": None, "tone_of_voice": None,
+        },
+        "practitioner": {
+            "label_en": "Practical Mentor", "label_pt": "Mentor Prático",
+            "persona_title": "The Practitioner — a battle-tested specialist who teaches the move that actually works",
+            "tone_of_voice": "Direct, hands-on and outcome-driven. Explain the exact working procedure, the trade-off and the common failure, then hand the learner a reusable checklist. Concrete numbers and real workflows over theory.",
+        },
+        "socratic": {
+            "label_en": "Socratic Philosopher", "label_pt": "Filósofo Socrático",
+            "persona_title": "The Socratic Guide — a question-driven philosopher who makes the learner discover the answer",
+            "tone_of_voice": "Pose sharp questions before giving definitions, expose contradictions in intuitive answers, and guide the reader to the insight themselves. Calm, curious and relentlessly precise.",
+        },
+        "storyteller": {
+            "label_en": "Storytelling Essayist", "label_pt": "Ensaísta Narrador",
+            "persona_title": "The Storytelling Essayist — a vivid narrator who turns every concept into a memorable scene",
+            "tone_of_voice": "Narrative, cinematic and sensory. Open with a concrete scene or true anecdote, weave the concept through it, and close with a surprising human angle. Avoid dry bullet-point exposition.",
+        },
+        "rigorist": {
+            "label_en": "Rigorous Scientist", "label_pt": "Cientista Rigoroso",
+            "persona_title": "The Rigorous Scientist — an evidence-first researcher who separates fact from plausible story",
+            "tone_of_voice": "Precise, evidence-led and skeptical. Define terms exactly, cite the verified source for each claim, show the experiment or data behind it, and flag uncertainty explicitly.",
+        },
+    }
+
     @classmethod
-    async def classify(cls, topic: str, level: str = "Básico") -> Dict[str, Any]:
+    def personas_payload(cls) -> list:
+        return [{"id": pid, "label_en": p["label_en"], "label_pt": p["label_pt"]}
+                for pid, p in cls.PERSONAS.items()]
+
+    @classmethod
+    def apply_persona(cls, profile: Dict[str, Any], persona_id: str | None) -> Dict[str, Any]:
+        """Override the AI-inferred persona when the learner picked one."""
+        preset = cls.PERSONAS.get((persona_id or "auto").strip().lower())
+        if preset and preset.get("persona_title"):
+            profile["persona_title"] = preset["persona_title"]
+            profile["tone_of_voice"] = preset["tone_of_voice"]
+            profile["selected_persona"] = persona_id
+        else:
+            profile["selected_persona"] = "auto"
+        return profile
+
+    @classmethod
+    async def classify(cls, topic: str, level: str = "Básico", persona: str | None = None) -> Dict[str, Any]:
         system_prompt = (
             "Você é o Orquestrador Epistemológico e Pedagógico da Trivium.\n"
             "Sua missão é desenhar a alma pedagógica de um curso envolvente, fascinante e memorável (Padrão Masterclass / Coursera / Hitch).\n"
@@ -67,10 +113,10 @@ class DomainClassifier:
                 "case_study_format": str(data.get("case_study_format") or cls.DEFAULT_PROFILE["case_study_format"]).strip(),
             }
             logger.info(f"[DomainClassifier] Perfil gerado para '{topic}': {profile['dynamic_domain_name']} ({profile['persona_title']})")
-            return profile
+            return cls.apply_persona(profile, persona)
         except Exception as e:
             logger.warning(f"[DomainClassifier] Fallback heurístico ativado para '{topic}': {e}")
             fallback = dict(cls.DEFAULT_PROFILE)
             fallback["dynamic_domain_name"] = f"Estudos Especializados em {topic}"
             fallback["persona_title"] = f"Especialista e Pesquisador em {topic}"
-            return fallback
+            return cls.apply_persona(fallback, persona)

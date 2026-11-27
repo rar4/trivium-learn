@@ -14,6 +14,7 @@ from app.database import engine
 from app.models.entities import Course, Module, Lesson, GenerationJob
 from app.agents.pipeline import CuratorAgent, WriterAgent, QuizMasterAgent, SummarizerAgent, ResearcherAgent
 from app.services.domain_classifier import DomainClassifier
+from app.services import catalog as _catalog
 
 LEVEL_SPECS = {
     "Teste": {"modules": 1, "lessons_per_module": 2, "words": 400},
@@ -82,9 +83,20 @@ class CourseOrchestrator:
         source_type: str = "web",
         book_filename: str = None,
         book_pages: int = None,
-        chapter_chunks: list = None
+        chapter_chunks: list = None,
+        persona: str = "auto"
     ):
-        specs = LEVEL_SPECS.get(level, LEVEL_SPECS["Básico"])
+        # The tier is resolved before any LLM call: Basic=4x3, Working=8x4, Mastery=12x5.
+        level = _catalog.resolve_level(level, language)
+        if level in LEVEL_SPECS:
+            specs = LEVEL_SPECS[level]
+        else:
+            # English canonical levels ("Intermediate", "Advanced") and tier ids
+            # map to the same tier contract, independent of the prompt language.
+            _tier = _catalog.tier_for_level(level)
+            specs = {"modules": _tier["modules"],
+                     "lessons_per_module": _tier["lessons_per_module"],
+                     "words": _tier["words"]}
         num_modules = specs["modules"]
         lessons_per_module = specs["lessons_per_module"]
         target_words = specs["words"]
@@ -108,7 +120,7 @@ class CourseOrchestrator:
 
         try:
             update_job(2, f"Classificando a natureza epistemológica de '{subject}'...")
-            domain_profile = await DomainClassifier.classify(subject, level)
+            domain_profile = await DomainClassifier.classify(subject, level, persona=persona)
             print(f"[Orchestrator] Domínio: {domain_profile.get('dynamic_domain_name')} | Persona: {domain_profile.get('persona_title')}")
 
             evidence_ledger = {}
@@ -116,13 +128,8 @@ class CourseOrchestrator:
                 update_job(4, f"Consolidando dossiê literário a partir de 100% dos capítulos do livro...")
                 # Constrói dossiê literário a partir dos capítulos reais
                 dossier_lines = [f"LIVRO-FONTE: {book_filename or subject} ({book_pages or len(chapter_chunks)*10} páginas)"]
-                sources_metadata = [{
-                    "title": book_filename or subject,
-                    "author": domain_profile.get("persona_title", "Autor da Obra"),
-                    "domain": "Arquivo Local (PDF/EPUB)",
-                    "url": "",
-                    "description": f"Obra original com {len(chapter_chunks)} capítulos/seções indexados integralmente."
-                }]
+                # Chapter-level citations make every uploaded lesson traceable.
+                sources_metadata = _catalog.document_citations(chapter_chunks, book_filename or subject)
                 for ch in chapter_chunks:
                     dossier_lines.append(f"\n### [Capítulo {ch.get('chapter_index', 1)}: {ch.get('title', '')}]")
                     # Inclui as primeiras 300 palavras de cada capítulo no dossiê macro
@@ -256,6 +263,7 @@ class CourseOrchestrator:
                             f"--- DIRETRIZES DE FIDELIDADE AO LIVRO ---\n"
                             f"1. Você DEVE obrigatoriamente explorar os termos exatos, metáforas originais, estudos de caso e conceitos formulados pelo autor neste capítulo.\n"
                             f"2. Capture as entrelinhas e as advertências do autor sobre equívocos comuns.\n"
+                            f"3. Cite a fonte em texto, ao menos uma vez, como [Capítulo {ch_idx + 1}, p. {target_ch.get('page_start', 1)}] — rastreabilidade obrigatória do material enviado.\n"
                         )
 
                     # 1. Redação Integral da Apostila com Retry Fail-Safe e Scorecard de Qualidade
