@@ -108,7 +108,7 @@ export default function CoursePage() {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/trivium-logo.png" alt="Trivium Logo" className="w-full h-full object-contain" />
             </div>
-            <span className="text-xs font-extrabold text-[#ffe500] uppercase tracking-widest">TRIVIUM</span>
+            <span className="hidden sm:inline text-xs font-extrabold text-[#ffe500] uppercase tracking-widest">TRIVIUM</span>
           </Link>
           <span className="text-neutral-700 hidden sm:inline">|</span>
           <Link href="/" className="flex items-center space-x-1.5 text-xs font-bold text-neutral-400 hover:text-white transition-all">
@@ -118,13 +118,13 @@ export default function CoursePage() {
         </div>
         <div className="flex items-center space-x-3">
           <GamificationPanel compact lang={lang} />
-          <button onClick={() => setShowSettingsModal(true)} className="flex items-center space-x-1.5 text-xs font-semibold text-neutral-300 hover:text-white bg-[#18181b] hover:bg-[#27272a] border border-[#27272a] hover:border-[#ffe500]/40 px-3 py-1 rounded-lg transition-all">
+          <button onClick={() => setShowSettingsModal(true)} title={t.settings} aria-label={t.settings} className="flex items-center space-x-1.5 text-xs font-semibold text-neutral-300 hover:text-white bg-[#18181b] hover:bg-[#27272a] border border-[#27272a] hover:border-[#ffe500]/40 px-3 py-1 rounded-lg transition-all">
             <Settings className="w-3.5 h-3.5 text-[#ffe500]" />
             <span className="hidden sm:inline">{t.settings}</span>
           </button>
-          <button onClick={() => { setDeleteError(null); setShowDeleteModal(true); }} className="flex items-center space-x-1.5 text-xs font-semibold text-red-400 hover:text-red-300 bg-red-950/20 hover:bg-red-950/40 border border-red-900/30 px-3 py-1 rounded-lg transition-all">
+          <button onClick={() => { setDeleteError(null); setShowDeleteModal(true); }} title={t.course_delete_btn} aria-label={t.course_delete_btn} className="flex items-center space-x-1.5 text-xs font-semibold text-red-400 hover:text-red-300 bg-red-950/20 hover:bg-red-950/40 border border-red-900/30 px-3 py-1 rounded-lg transition-all">
             <Trash2 className="w-3.5 h-3.5" />
-            <span>{t.course_delete_btn}</span>
+            <span className="hidden sm:inline">{t.course_delete_btn}</span>
           </button>
         </div>
       </header>
