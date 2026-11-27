@@ -24,7 +24,7 @@ spaced repetition, and a mastery certificate.
   (`basic`/`working`/`mastery`); the API resolves it to a canonical level before
   the orchestrator reads `LEVEL_SPECS`, so English and Portuguese sessions get
   the same course size. `backend/tests/test_catalog_tiers.py` pins the sizes,
-  aliases, personas and upload citations (8 tests).
+  aliases, personas and upload citations (7 tests).
 - **Personas:** `/api/catalog/personas` exposes `auto`, `practitioner`,
   `socratic`, `storyteller`, `rigorist`. The picker is available in both web and
   upload modes and the chosen voice overrides the AI-inferred mentor profile.

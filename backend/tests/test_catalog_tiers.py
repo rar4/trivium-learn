@@ -5,7 +5,19 @@ Pure-function tests: no LLM calls, no network. They pin the tier contract
 way to the orchestrator's LEVEL_SPECS, and verify upload citations and the
 selectable domain personas.
 """
-from app.agents.pipeline import normalize_level
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BACKEND))
+# Bind the shared SQLModel engine to an isolated DB *before* importing any app
+# module. Otherwise this module would bind it to the developer's real DB and
+# every other acceptance test would inherit its XP/profile state.
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp()}/catalog_tiers_test.db")
+
+from app.agents.pipeline import normalize_level  # noqa: E402
 from app.graph.orchestrator import LEVEL_SPECS
 from app.services import catalog
 from app.services.domain_classifier import DomainClassifier
@@ -92,8 +104,8 @@ def test_uploaded_material_produces_chapter_citations():
 
 
 def test_catalog_api_exposes_tiers_personas_and_categories():
-    from fastapi.testclient import TestClient
-    from app.main import app
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from app.main import app  # noqa: PLC0415
 
     with TestClient(app) as client:
         tiers = client.get("/api/catalog/tiers").json()
