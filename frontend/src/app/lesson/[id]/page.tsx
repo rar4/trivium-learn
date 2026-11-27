@@ -7,8 +7,12 @@ import {
   submitQuiz, 
   submitSimulation, 
   submitSocraticDuel, 
-  downloadLessonPdf, 
+  downloadLessonPdf,
+  downloadLessonNotes,
+  getMiniProject,
+  submitMiniProject,
   LessonFullDetail,
+  MiniProjectState,
   IndicatorState,
   SimulationTurn1Option,
   SimulationTurn2Option
@@ -30,6 +34,8 @@ import {
   Settings,
   ChevronLeft,
   Bookmark,
+  FileText,
+  Sparkles,
   ExternalLink,
   Copy,
   Check
@@ -516,6 +522,11 @@ export default function LessonPage() {
   const [isSubmittingSocratic, setIsSubmittingSocratic] = useState(false);
   const [socraticPassed, setSocraticPassed] = useState(false);
 
+  // Estado do Mini-projeto (saída de Retórica: construir e apresentar)
+  const [miniProject, setMiniProject] = useState<MiniProjectState | null>(null);
+  const [miniProjectText, setMiniProjectText] = useState("");
+  const [isSubmittingMiniProject, setIsSubmittingMiniProject] = useState(false);
+
   useEffect(() => {
     if (!lessonId) return;
     getLesson(lessonId)
@@ -551,6 +562,13 @@ export default function LessonPage() {
             feedback: data.discursive_feedback || (isSavedEn ? "Passed the discursive assessment." : "Aprovado na avaliação discursiva."),
           });
         }
+        // Retórica Express: brief + artefato salvo (escopo desta aula apenas).
+        getMiniProject(lessonId)
+          .then((mp) => {
+            setMiniProject(mp);
+            if (mp.submission) setMiniProjectText(mp.submission);
+          })
+          .catch(() => {});
       })
       .catch((err) => {
         console.error(err);
@@ -845,6 +863,13 @@ export default function LessonPage() {
       if (res.passed) {
         setSocraticPassed(true);
         confetti({ particleCount: 100, spread: 90, origin: { y: 0.6 } });
+        // Rhetoric Express unlocks here: refresh the brief without a page reload.
+        getMiniProject(lesson.id)
+          .then((mp) => {
+            setMiniProject(mp);
+            if (mp.submission) setMiniProjectText(mp.submission);
+          })
+          .catch(() => {});
       }
       if (res.lesson_completed) {
         setLesson((prev) => (prev ? { ...prev, status: "completed" } : null));
@@ -854,6 +879,29 @@ export default function LessonPage() {
       alert(lang === "en-US" ? "Failed to submit rebuttal to Socratic Debater." : "Erro ao submeter réplica do Duelo Socrático.");
     } finally {
       setIsSubmittingSocratic(false);
+    }
+  };
+
+  const handleMiniProjectSubmit = async () => {
+    const text = miniProjectText.trim();
+    if (!text || isSubmittingMiniProject) return;
+    setIsSubmittingMiniProject(true);
+    try {
+      const res = await submitMiniProject(lesson.id, text);
+      setMiniProject((prev) => prev ? {
+        ...prev,
+        passed: res.passed,
+        submission: text,
+        feedback: res.feedback,
+        score: res.score,
+      } : prev);
+      if (res.passed) confetti({ particleCount: 60, spread: 65, origin: { y: 0.75 } });
+    } catch {
+      alert(lang === "en-US"
+        ? "Failed to submit your artifact. Please try again."
+        : "Erro ao enviar seu artefato. Tente novamente.");
+    } finally {
+      setIsSubmittingMiniProject(false);
     }
   };
 
@@ -890,7 +938,7 @@ export default function LessonPage() {
       isTutorChatOpen ? "sm:pr-[420px] md:pr-[460px] lg:pr-[480px]" : ""
     }`}>
       {/* Header Fixo de Navegação */}
-      <header className="h-14 border-b border-[#1f1f23] px-4 sm:px-8 flex justify-between items-center bg-[#09090b]/95 backdrop-blur-md sticky top-0 z-40">
+      <header className="min-h-14 h-auto border-b border-[#1f1f23] px-4 sm:px-8 flex flex-wrap items-center justify-between gap-y-2 py-2 sm:h-14 sm:py-0 bg-[#09090b]/95 backdrop-blur-md sticky top-0 z-40">
         {/* Lado Esquerdo: Logo Home + Botão Voltar */}
         <div className="flex items-center space-x-3">
           <Link href="/" className="flex items-center space-x-2 group" title={lang === "en-US" ? "Home (Trivium)" : "Página Inicial (Trivium)"}>
@@ -910,12 +958,12 @@ export default function LessonPage() {
             className="flex items-center space-x-1.5 text-xs font-bold text-neutral-400 hover:text-white transition-colors group cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
-            <span>{t.lesson_back_course}</span>
+            <span className="hidden sm:inline">{t.lesson_back_course}</span>
           </button>
         </div>
 
         {/* Seletor de Modo (Leitor vs Questões) */}
-        <div className="flex items-center bg-[#141416] p-1 rounded-xl border border-[#27272a]">
+        <div className="order-3 w-full sm:order-none sm:w-auto flex items-center justify-center sm:justify-start bg-[#141416] p-1 rounded-xl border border-[#27272a]">
           <button
             id="tab-reader-btn"
             onClick={switchToReader}
@@ -926,7 +974,7 @@ export default function LessonPage() {
             }`}
           >
             <BookOpen className="w-3.5 h-3.5 text-[#ffe500]" />
-            <span>{t.lesson_tab_booklet}</span>
+            <span className="hidden sm:inline">{t.lesson_tab_booklet}</span>
           </button>
 
           <button
@@ -939,7 +987,7 @@ export default function LessonPage() {
             }`}
           >
             <ShieldCheck className="w-3.5 h-3.5" />
-            <span>{t.lesson_tab_quiz}</span>
+            <span className="hidden sm:inline">{t.lesson_tab_quiz}</span>
             {isLessonCompleted && (
               <CheckCircle2 className="w-3.5 h-3.5 text-green-500 ml-1" />
             )}
@@ -947,11 +995,11 @@ export default function LessonPage() {
         </div>
 
         {/* Lado Direito: gamificação + zoom + PDF */}
-        <div className="flex items-center space-x-2 sm:space-x-3">
+        <div className="flex items-center space-x-1.5 sm:space-x-3">
           <GamificationPanel compact lang={lang} />
           {/* Controles de Zoom (100% a 200%) */}
           <div 
-            className="flex items-center bg-[#141416] p-1 rounded-xl border border-[#27272a] space-x-1"
+            className="hidden sm:flex items-center bg-[#141416] p-1 rounded-xl border border-[#27272a] space-x-1"
             title={lang === "en-US" ? "Global Zoom: 80% to 150% (Ctrl + Mouse Wheel or Ctrl +/-)" : "Zoom global: 80% a 150% (Ctrl + Roda do Mouse ou Ctrl +/-)"}
           >
             <button
@@ -994,6 +1042,17 @@ export default function LessonPage() {
           >
             <Download className="w-3.5 h-3.5 text-[#ffe500]" />
             <span className="hidden sm:inline">{t.lesson_btn_download_pdf}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => downloadLessonNotes(lesson.id).catch(() => {})}
+            className="flex items-center space-x-2 bg-[#18181b] hover:bg-[#222226] border border-[#2e2e33] text-white px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+            title={t.lesson_btn_download_notes}
+            aria-label={t.lesson_btn_download_notes}
+          >
+            <FileText className="w-3.5 h-3.5 text-[#ffe500]" />
+            <span className="hidden lg:inline">{t.lesson_btn_download_notes}</span>
           </button>
 
           <button
@@ -1487,11 +1546,12 @@ export default function LessonPage() {
                   ))}
                 </div>
 
-                {/* Se a aula for antiga e ainda tiver fill_in_the_blanks e não tiver simulation */}
-                {!quiz.simulation && quiz.fill_in_the_blanks && quiz.fill_in_the_blanks.length > 0 && (
+                {/* Retrieval practice is part of the Grammar gate for EVERY lesson,
+                    including lessons that also have a Logic simulation. */}
+                {quiz.fill_in_the_blanks && quiz.fill_in_the_blanks.length > 0 && (
                   <div className="pt-4 border-t border-[#222226] space-y-4">
                     <span className="text-xs font-bold text-[#ffe500] uppercase tracking-wider block">
-                      {lang === "en-US" ? "Fill in the Blanks (Legacy)" : "Preenchimento de Lacunas (Legado)"}
+                      {lang === "en-US" ? "Fill in the Blanks" : "Preenchimento de Lacunas"}
                     </span>
                     {quiz.fill_in_the_blanks.map((b, bIdx) => (
                       <div key={bIdx} className="bg-[#18181b] p-5 rounded-2xl border border-[#27272a] space-y-3">
@@ -1896,6 +1956,90 @@ export default function LessonPage() {
                       </div>
                       <p className="text-neutral-200 leading-relaxed font-normal whitespace-pre-line">
                         {socraticResult.feedback}
+                      </p>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* PARTE 4: RETÓRICA EXPRESS — CONSTRUIR E APRESENTAR (MINI-PROJETO) */}
+              {miniProject?.available && (
+                <section id="mini-project-section" className="glass-panel rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl relative overflow-hidden">
+                  <div className="border-b border-[#222226] pb-4">
+                    <div className="text-xs font-black uppercase tracking-wider text-[#ffe500] flex items-center space-x-2">
+                      <Sparkles className="w-4 h-4" />
+                      <span>{lang === "en-US" ? "RHETORIC GATE · EXPRESS" : "PORTÃO DA RETÓRICA · EXPRESS"}</span>
+                    </div>
+                    <h3 className="text-xl md:text-2xl font-black text-white mt-1 tracking-tight">
+                      {miniProject.brief?.title || t.lesson_build_title}
+                    </h3>
+                    <p className="text-xs text-neutral-400 mt-1 font-normal leading-relaxed">
+                      {t.lesson_build_desc}
+                    </p>
+                  </div>
+
+                  <div className="glass-panel-scenario p-5 rounded-2xl space-y-3">
+                    <span className="text-xs font-mono font-bold uppercase text-[#ffe500] tracking-wider block">
+                      {lang === "en-US" ? "YOUR BRIEF" : "SEU BRIEFING"}
+                    </span>
+                    <p className="text-sm text-neutral-100 leading-relaxed font-normal">
+                      {miniProject.brief?.prompt}
+                    </p>
+                    {Array.isArray(miniProject.brief?.checklist) && miniProject.brief.checklist.length > 0 && (
+                      <ul className="space-y-1.5 pt-1">
+                        {miniProject.brief.checklist.map((item, idx) => (
+                          <li key={idx} className="flex items-start space-x-2 text-xs text-neutral-300 font-normal">
+                            <Check className="w-3.5 h-3.5 text-[#ffe500] mt-0.5 shrink-0" />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {miniProject.brief?.deliverable_hint && (
+                      <p className="text-[11px] text-neutral-500 italic pt-1">
+                        {miniProject.brief.deliverable_hint}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-3">
+                    <textarea
+                      id="mini-project-input"
+                      rows={5}
+                      disabled={miniProject.passed || isSubmittingMiniProject}
+                      placeholder={t.lesson_build_placeholder}
+                      value={miniProjectText}
+                      onChange={(e) => setMiniProjectText(e.target.value)}
+                      className="glass-panel-input w-full rounded-2xl p-4 text-sm text-white outline-none font-normal leading-relaxed placeholder:text-neutral-500 transition-colors disabled:opacity-70"
+                    />
+                    {!miniProject.passed && (
+                      <button
+                        id="mini-project-submit"
+                        onClick={handleMiniProjectSubmit}
+                        disabled={isSubmittingMiniProject || !miniProjectText.trim()}
+                        className="w-full bg-[#ffe500] hover:bg-[#fff000] text-black font-extrabold py-3.5 rounded-2xl text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all disabled:opacity-40 shadow-lg shadow-[#ffe500]/10 cursor-pointer"
+                      >
+                        <Sparkles className="w-4 h-4" />
+                        <span>
+                          {isSubmittingMiniProject ? t.lesson_build_submitting : t.lesson_build_submit}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+
+                  {miniProject.passed && (
+                    <div id="mini-project-result" className="p-5 rounded-2xl text-xs sm:text-sm space-y-2 border bg-emerald-950/20 text-emerald-300 border-emerald-500/30 backdrop-blur-md">
+                      <div className="flex flex-wrap items-center justify-between gap-2 font-black text-sm">
+                        <span className="flex items-center space-x-2">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>{lang === "en-US" ? "ARTIFACT PRESENTED" : "ARTEFATO APRESENTADO"}</span>
+                        </span>
+                        <span className="bg-black/40 px-3 py-1 rounded-lg font-mono">
+                          {t.lesson_build_score}: {miniProject.score ?? "-"}/10
+                        </span>
+                      </div>
+                      <p className="text-neutral-200 leading-relaxed font-normal whitespace-pre-line">
+                        {miniProject.feedback}
                       </p>
                     </div>
                   )}

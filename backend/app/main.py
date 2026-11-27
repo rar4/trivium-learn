@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import json
 import shutil
@@ -6,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, UploadFile, File, Request, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select, delete
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ from datetime import date, timedelta
 from app.graph.orchestrator import CourseOrchestrator
 from app.agents.pipeline import GraderAgent, normalize_level
 from app.services.tutor_service import TutorService
+from app.services.mini_project_service import MiniProjectService
 from app.services.document_extractor import (
     extract_from_pdf, extract_from_epub, build_chapter_chunks, clean_book_title_from_filename
 )
@@ -500,7 +502,7 @@ def get_course_details(course_id: int, session: Session = Depends(get_session),
         modules_res.append({
             "id": cur_mod.id, "module_number": cur_mod.module_number, "title": cur_mod.title,
             "is_unlocked": True, "is_completed": False,
-            "lessons": [_lesson_summary(cur_lesson)],
+            "lessons": [_blind_step(cur_lesson)],
         })
 
     payload = {
@@ -519,7 +521,7 @@ def get_course_details(course_id: int, session: Session = Depends(get_session),
         "sources": json.loads(course.sources_json) if course.sources_json else [],
         "modules": modules_res,
         "completed_lessons": completed,
-        "next_step": _lesson_summary(current_pair[1]) if current_pair else None,
+        "next_step": _blind_step(current_pair[1]) if current_pair else None,
     }
     return _progression.strip_counts(payload)
 
@@ -650,7 +652,9 @@ def get_lesson(lesson_id: int, session: Session = Depends(get_session),
         "discursive_feedback": effective.discursive_feedback,
         "simulation_passed": effective.simulation_passed,
         "socratic_passed": effective.socratic_passed,
-        "socratic_state": json.loads(effective.socratic_state_json) if effective.socratic_state_json else None
+        "socratic_state": json.loads(effective.socratic_state_json) if effective.socratic_state_json else None,
+        "mini_project": (json.loads(effective.socratic_state_json).get("mini_project")
+                         if effective.socratic_state_json else None),
     }, suppress_counts)
 
 def check_and_unlock_lesson(session: Session, lesson: Lesson):
@@ -835,6 +839,35 @@ def mastery_dashboard(session: Session = Depends(get_session),
     No totals, percentages, future lesson titles or remaining-work counts.
     """
     return _progress_store.mastery_dashboard(session, user)
+
+
+@app.get("/api/dashboard/mastery/report")
+def mastery_report(session: Session = Depends(get_session),
+                   user: User = Depends(_auth.current_user)):
+    """Downloadable post-hoc report (same fog-safe data as the dashboard)."""
+    data = _progress_store.mastery_dashboard(session, user)
+    lines = [
+        f"# Mastery report / Relatório de domínio — {data['display_name']}",
+        "",
+        f"XP: {data['xp']} · Level / Nível: {data['level']}",
+        "",
+        "## Mastered by skill / Domínio por habilidade",
+        "",
+    ]
+    for skill in data["mastered_by_skill"]:
+        lines += [f"### {skill['category']}", ""]
+        for item in skill["mastered_items"]:
+            lines.append(f"- {item['title']} · {item.get('course') or ''} · {item.get('completed_on') or ''}")
+        lines.append("")
+    lines += ["## Due for review / Para revisar", ""]
+    for item in data["reviewable_items"]:
+        lines.append(f"- {item.get('prompt') or item.get('item_key')} · {item['due_on']}")
+    lines.append("")
+    return Response(
+        content="\n".join(lines),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="trivium-mastery-report.md"'},
+    )
 
 @app.get("/api/reviews/due")
 def reviews_due(session: Session = Depends(get_session),
@@ -1160,6 +1193,124 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
         }
     else:
         raise HTTPException(status_code=400, detail="Round inválido. Deve ser 1 ou 2.")
+
+
+class MiniProjectSubmitRequest(BaseModel):
+    submission: str
+
+
+def _mini_project_course_language(session: Session, lesson: Lesson) -> str:
+    mod = session.get(Module, lesson.module_id)
+    course = session.get(Course, mod.course_id) if mod else None
+    return getattr(course, "language", "pt-BR") or "pt-BR" if course else "pt-BR"
+
+
+@app.get("/api/lessons/{lesson_id}/mini-project")
+def get_mini_project(lesson_id: int, session: Session = Depends(get_session),
+                     user: User = Depends(_auth.current_user)):
+    """Rhetoric 'Express' brief and the learner's saved artifact (never future content)."""
+    lesson = session.get(Lesson, lesson_id)
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    lang = _mini_project_course_language(session, lesson)
+    state = _progression.socratic_data(effective)
+    saved = state.get("mini_project") or {}
+    return {
+        "available": bool(effective.socratic_passed or effective.discursive_passed),
+        "passed": bool(saved.get("passed")),
+        "brief": saved.get("brief") or MiniProjectService.build_brief(lesson, None, lang),
+        "submission": saved.get("submission"),
+        "feedback": saved.get("feedback"),
+        "score": saved.get("score"),
+    }
+
+
+@app.post("/api/lessons/{lesson_id}/mini-project")
+async def submit_mini_project(lesson_id: int, req: MiniProjectSubmitRequest,
+                              session: Session = Depends(get_session),
+                              user: User = Depends(_auth.current_user)):
+    """Grade the build/present artifact. Available only after the teach-back duel."""
+    lesson = session.get(Lesson, lesson_id)
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    _require_stage(effective, "unlock")  # all three Trivium gates must have passed
+    clean = (req.submission or "").strip()
+    if len(clean) < 30:
+        raise HTTPException(status_code=400, detail="The artifact is too short. Write at least 30 characters.")
+
+    lang = _mini_project_course_language(session, lesson)
+    state = _progression.socratic_data(effective)
+    brief = (state.get("mini_project") or {}).get("brief") or MiniProjectService.build_brief(lesson, None, lang)
+    result = await MiniProjectService.grade(
+        submission=clean, brief=brief,
+        core_concept=lesson.core_concept or "", language=lang,
+    )
+    state["mini_project"] = {
+        "brief": brief,
+        "submission": clean,
+        "feedback": result["feedback"],
+        "score": result["score"],
+        "passed": result["passed"],
+    }
+    _progress_store.apply(session, user, lesson,
+                          socratic_state_json=json.dumps(state, ensure_ascii=False))
+    session.commit()
+    return {"success": True, "mini_project_passed": result["passed"], **result}
+
+
+@app.get("/api/lessons/{lesson_id}/export-notes")
+def export_notes(lesson_id: int, session: Session = Depends(get_session),
+                 user: User = Depends(_auth.current_user)):
+    """Personal Markdown booklet: lesson notes + the learner's own Rhetoric work."""
+    lesson = session.get(Lesson, lesson_id)
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    lang = _mini_project_course_language(session, lesson)
+    is_en = lang.lower().startswith("en")
+    state = _progression.socratic_data(effective)
+    mp = state.get("mini_project") or {}
+    gates = _progression.gate_state(effective)
+
+    title = lesson.title or "Trivium"
+    lines = [f"# {title}", ""]
+    lines += [(f"**Core concept:** {lesson.core_concept}" if is_en
+               else f"**Ideia central:** {lesson.core_concept}"), ""]
+    if lesson.content_markdown:
+        lines += [lesson.content_markdown.strip(), ""]
+    lines += ["---", ""]
+    lines += [("## My teach-back" if is_en else "## Minha reconstrução"), ""]
+    if state.get("round1_answer"):
+        lines += [f"**1.** {state['round1_answer']}", ""]
+    if state.get("cognitive_knot"):
+        lines += [f"**2 ({'challenge' if is_en else 'desafio'}).** {state['cognitive_knot']}", ""]
+    if state.get("round2_answer"):
+        lines += [f"**{'Rebuttal' if is_en else 'Réplica'}:** {state['round2_answer']}", ""]
+    if state.get("final_feedback"):
+        lines += [f"**{'Feedback' if is_en else 'Feedback'}:** {state['final_feedback']}", ""]
+    lines += [("## Mini-project" if is_en else "## Mini-projeto"), ""]
+    if mp.get("brief"):
+        lines += [str(mp["brief"].get("prompt", "")), ""]
+    if mp.get("submission"):
+        lines += [mp["submission"], ""]
+    if mp.get("feedback"):
+        lines += [f"**{'Feedback' if is_en else 'Feedback'} ({mp.get('score', '-')}/10):** {mp['feedback']}", ""]
+    lines += ["---", ""]
+    lines += [("Mastery gates: " if is_en else "Portões de maestria: ")
+              + ", ".join(f"{key}={'ok' if gates[key] else '--'}"
+                          for key in ("grammar", "logic", "rhetoric")), ""]
+
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", title).strip("-")[:60] or "lesson"
+    return Response(
+        content="\n".join(lines),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="trivium-notes-{lesson_id}-{safe}.md"'},
+    )
 
 
 @app.get("/api/lessons/{lesson_id}/download-pdf")

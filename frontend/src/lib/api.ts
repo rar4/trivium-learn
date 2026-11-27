@@ -276,6 +276,23 @@ export interface SocraticState {
   passed?: boolean;
 }
 
+export interface MiniProjectBrief {
+  title?: string;
+  lesson_title?: string;
+  prompt: string;
+  checklist?: string[];
+  deliverable_hint?: string;
+}
+
+export interface MiniProjectState {
+  available: boolean;
+  passed: boolean;
+  brief: MiniProjectBrief;
+  submission?: string | null;
+  feedback?: string | null;
+  score?: number | null;
+}
+
 export interface LessonFullDetail {
   id: number;
   course_id?: number;
@@ -312,6 +329,7 @@ export interface LessonFullDetail {
   simulation_passed?: boolean;
   socratic_passed?: boolean;
   socratic_state?: SocraticState | null;
+  mini_project?: MiniProjectState | null;
 }
 
 export interface JobStatusResponse {
@@ -822,6 +840,56 @@ export async function downloadLessonPdf(lessonId: number): Promise<void> {
   const a = document.createElement("a");
   a.href = url;
   a.download = `trivium-lesson-${lessonId}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Rhetoric Express: lesson-scoped build/present brief + saved artifact. */
+export async function getMiniProject(lessonId: number): Promise<MiniProjectState> {
+  const res = await apiFetch(`/api/lessons/${lessonId}/mini-project`);
+  if (!res.ok) throw new Error("Failed to load the mini-project brief");
+  return res.json();
+}
+
+export async function submitMiniProject(
+  lessonId: number,
+  submission: string,
+): Promise<{ success: boolean; mini_project_passed: boolean; passed: boolean; score: number; feedback: string }> {
+  const res = await apiFetch(`/api/lessons/${lessonId}/mini-project`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ submission }),
+  });
+  if (!res.ok) throw new Error("Failed to submit the mini-project");
+  return res.json();
+}
+
+/** Personal notes booklet (Markdown) with this lesson's teach-back work. */
+export async function downloadLessonNotes(lessonId: number): Promise<void> {
+  const res = await apiFetch(`/api/lessons/${lessonId}/export-notes`);
+  if (!res.ok) throw new Error("Failed to download notes");
+  const disposition = res.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = match ? match[1] : `trivium-notes-${lessonId}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Post-hoc mastery report (only earned work, never future steps). */
+export async function downloadMasteryReport(): Promise<void> {
+  const res = await apiFetch("/api/dashboard/mastery/report");
+  if (!res.ok) throw new Error("Failed to download the mastery report");
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "trivium-mastery-report.md";
   document.body.appendChild(a);
   a.click();
   a.remove();

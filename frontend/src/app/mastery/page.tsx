@@ -2,8 +2,8 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CheckCircle2, Eye, RotateCcw, Sparkles } from "lucide-react";
-import { completeReview, getMasteryDashboard, MasteryDashboard } from "@/lib/api";
+import { ArrowLeft, CheckCircle2, Eye, FileText, RotateCcw, Sparkles } from "lucide-react";
+import { completeReview, downloadMasteryReport, getMasteryDashboard, MasteryDashboard } from "@/lib/api";
 
 /**
  * Post-hoc mastery view. It only lists work the learner has already mastered
@@ -66,6 +66,15 @@ export default function MasteryPage() {
               <div className="flex flex-wrap items-center gap-3 text-xs font-bold text-neutral-400">
                 <span className="text-[#ffe500] flex items-center gap-1"><Sparkles className="w-3.5 h-3.5" />{data.xp} XP</span>
                 <span>{en ? "Level" : "Nível"} {data.level}</span>
+                <button
+                  type="button"
+                  id="download-mastery-report"
+                  onClick={() => downloadMasteryReport().catch(() => setError(en ? "Report download failed." : "Falha ao baixar o relatório."))}
+                  className="flex items-center gap-1.5 bg-[#18181b] hover:bg-[#222226] border border-[#2e2e33] text-white font-bold px-3 py-1.5 rounded-lg text-[11px] cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#ffe500]" />
+                  {en ? "Download report" : "Baixar relatório"}
+                </button>
               </div>
             </section>
 

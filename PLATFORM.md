@@ -37,6 +37,28 @@ spaced repetition, and a mastery certificate.
   hook, stage) instead of the blind `/next-step` pointer, so the single revealed
   card has content without exposing future steps.
 
+### Rhetoric Express, exports and mastery report
+
+- **Build & Present:** after the two-round Socratic duel, `GET|POST /api/lessons/{id}/mini-project`
+  serves a lesson-scoped brief, grades the learner's artifact (LLM when configured,
+  deterministic rubric offline), and persists it in the same per-user
+  `socratic_state_json` used by the duel. No schema change and no cross-lesson
+  content: the brief is built from the current lesson's `core_concept` only.
+- **Exports:** `GET /api/lessons/{id}/export-notes` produces a Markdown booklet
+  with the lesson text, the learner's teach-back answers and the mini-project;
+  `GET /api/lessons/{id}/download-pdf` remains the editorial PDF. Both are
+  authenticated and refuse locked lessons.
+- **Dashboard report:** `GET /api/dashboard/mastery/report` downloads the
+  post-hoc mastery view (earned work and due reviews only) from the same
+  fog-safe data source as `/api/dashboard/mastery`.
+- **Mobile:** the lesson header wraps to two rows below 640px, labels/zoom
+  collapse to icons, and the tutor sidebar is full-width inside the viewport.
+  Retrieval practice always renders alongside a Logic simulation, so the
+  Grammar gate stays completable, and the Express brief appears as soon as the
+  teach-back duel is passed (no reload). The full loop is covered by
+  `backend/tests/test_e2e_loop.py` (Learn → Quiz → Simulate → Teach-back →
+  Express → Unlock, tutor scoping and both exports).
+
 Engine files intentionally **not modified**: `backend/app/agents/pipeline.py`,
 `backend/app/services/researcher.py`, `backend/app/schemas/curriculum.py`,
 `backend/app/schemas/quiz.py`, `backend/app/graph/orchestrator.py`.
