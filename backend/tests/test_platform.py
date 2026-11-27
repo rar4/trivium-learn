@@ -13,10 +13,13 @@ BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp()}/test.db"
 
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
-from app.database import engine, init_db  # noqa: E402
+import app.database as db  # noqa: E402
+from app.database import init_db  # noqa: E402
 from app.models.entities import Course, Module, Lesson  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -24,6 +27,17 @@ SECRET_FUTURE = ["SECRET Future Lesson Alpha", "SECRET Future Lesson Beta",
                  "SECRET Future Module Zeta"]
 FORBIDDEN_KEYS = {"total_modules", "total_lessons", "progress_percent",
                   "total", "remaining", "lesson_number"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def isolated_db():
+    """Bind this module to a private DB: app.database is imported once per suite."""
+    original = db.engine
+    path = Path(tempfile.mkdtemp(prefix="trivium-platform-")) / "test.db"
+    db.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+    init_db()
+    yield
+    db.engine = original
 
 
 def _quiz():
@@ -46,7 +60,7 @@ def _quiz():
 
 def _seed():
     init_db()
-    with Session(engine) as s:
+    with Session(db.engine) as s:
         c = Course(subject="Python & Sistemas Distribuidos", level="Básico", language="pt-BR")
         s.add(c); s.commit(); s.refresh(c)
         m1 = Module(course_id=c.id, module_number=1, title="Visible First Module", is_unlocked=True)
@@ -154,7 +168,7 @@ def test_fog_of_war():
     assert stats["xp"] == 0, stats
 
     # Manually mark completion path: set socratic_passed and drive unlock logic
-    with Session(engine) as s:
+    with Session(db.engine) as s:
         lesson = s.get(Lesson, l1)
         lesson.socratic_passed = True
         s.add(lesson); s.commit()

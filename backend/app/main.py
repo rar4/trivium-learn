@@ -4,7 +4,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, UploadFile, File, Request, Query
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, UploadFile, File, Request, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,9 +13,14 @@ from pydantic import BaseModel
 import logging
 
 from app.database import init_db, get_session, engine
-from app.models.entities import Course, Module, Lesson, GenerationJob, LessonChatMessage, LearnerProfile, ReviewItem
+from app.models.entities import (
+    Course, Module, Lesson, GenerationJob, LessonChatMessage, LearnerProfile,
+    ReviewItem, User, AuthToken, LessonProgress,
+)
 from app.services import catalog as _catalog
 from app.services import progression as _progression
+from app.services import auth as _auth
+from app.services import user_progress as _progress_store
 from datetime import date, timedelta
 from app.graph.orchestrator import CourseOrchestrator
 from app.agents.pipeline import GraderAgent, normalize_level
@@ -59,6 +64,70 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 @app.on_event("startup")
 def on_startup():
     init_db()
+
+# ---------------------------------------------------------------------------
+# Accounts / auth
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = None
+    email: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/auth/register", status_code=201)
+def register(req: RegisterRequest, session: Session = Depends(get_session)):
+    username = (req.username or "").strip().lower()
+    if len(username) < 3 or len(username) > 40 or not all(
+        ch.isalnum() or ch in "._-" for ch in username
+    ):
+        raise HTTPException(status_code=400, detail="Username must be 3-40 chars: letters, digits, . _ -")
+    if len(req.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if session.exec(select(User).where(User.username == username)).first():
+        raise HTTPException(status_code=409, detail="Username already taken")
+    email = (req.email or "").strip().lower() or None
+    if email and session.exec(select(User).where(User.email == email)).first():
+        raise HTTPException(status_code=409, detail="Email already registered")
+    user = User(username=username, email=email,
+                password_hash=_auth.hash_password(req.password),
+                display_name=(req.display_name or username).strip())
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    session.add(LearnerProfile(user_id=user.id, display_name=user.display_name))
+    token = _auth.create_token(session, user.id)
+    return {"token": token, "user": _auth.public_user(user)}
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest, session: Session = Depends(get_session)):
+    username = (req.username or "").strip().lower()
+    user = session.exec(select(User).where(User.username == username)).first()
+    if user is None or not _auth.verify_password(req.password or "", user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account disabled")
+    return {"token": _auth.create_token(session, user.id), "user": _auth.public_user(user)}
+
+@app.get("/api/auth/me")
+def auth_me(user: User = Depends(_auth.require_user)):
+    return _auth.public_user(user)
+
+@app.post("/api/auth/logout")
+def logout(authorization: Optional[str] = Header(default=None),
+           session: Session = Depends(get_session)):
+    raw = _auth._parse_bearer(authorization)
+    if raw:
+        token = session.get(AuthToken, raw)
+        if token is not None:
+            token.revoked = True
+            session.add(token)
+            session.commit()
+    return {"success": True}
 
 class SettingsUpdateRequest(BaseModel):
     image_provider: Optional[str] = None
@@ -385,13 +454,13 @@ def get_job_status(job_id: str, session: Session = Depends(get_session)):
 
 @app.get("/api/courses")
 def list_courses(session: Session = Depends(get_session),
+                 user: User = Depends(_auth.current_user),
                  suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     courses = session.exec(select(Course).order_by(Course.id.desc())).all()
     results = []
     for c in courses:
-        modules = session.exec(select(Module).where(Module.course_id == c.id)).all()
-        lessons = session.exec(select(Lesson).join(Module).where(Module.course_id == c.id)).all()
-        completed_lessons = [l for l in lessons if l.status == "completed"]
+        completed_lessons = [l for _, l in _progress_store.ordered(session, c.id, user)
+                             if l.status == "completed"]
         results.append({
             "id": c.id,
             "subject": c.subject,
@@ -412,13 +481,14 @@ def list_courses(session: Session = Depends(get_session),
     return _progression.strip_counts(results, suppress_counts)
 
 @app.get("/api/courses/{course_id}")
-def get_course_details(course_id: int, session: Session = Depends(get_session)):
+def get_course_details(course_id: int, session: Session = Depends(get_session),
+                       user: User = Depends(_auth.current_user)):
     """Fog-of-War course view: current step + completed steps only."""
     course = session.get(Course, course_id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso nao encontrado")
 
-    ordered = _ordered_lessons(session, course_id)
+    ordered = _progress_store.ordered(session, course_id, user)
     completed = [_lesson_summary(l) for _, l in ordered if l.status == "completed"]
     current_pair = next(((m, l) for m, l in ordered if l.status != "completed"), None)
     if current_pair is not None and current_pair[1].status == "locked":
@@ -454,7 +524,8 @@ def get_course_details(course_id: int, session: Session = Depends(get_session)):
     return _progression.strip_counts(payload)
 
 @app.get("/api/courses/{course_id}/current-step")
-def course_current_step(course_id: int, session: Session = Depends(get_session)):
+def course_current_step(course_id: int, session: Session = Depends(get_session),
+                        user: User = Depends(_auth.current_user)):
     """Fog-of-War single-step endpoint.
 
     Returns ONLY the currently revealed step: id, stage, title, hook, content
@@ -464,10 +535,7 @@ def course_current_step(course_id: int, session: Session = Depends(get_session))
     course = session.get(Course, course_id)
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    ordered = _ordered_lessons(session, course_id)
-    current = next((l for _, l in ordered if l.status != "completed"), None)
-    if current is not None and current.status == "locked":
-        current = None
+    current = _progress_store.current(session, course_id, user)
     return _progression.current_step_payload(current)
 
 class CourseAccessModeRequest(BaseModel):
@@ -525,6 +593,7 @@ def delete_course(course_id: int, session: Session = Depends(get_session)):
     lesson_ids = [l.id for l in lessons if l.id is not None]
     if lesson_ids:
         session.exec(delete(ReviewItem).where(ReviewItem.lesson_id.in_(lesson_ids)))
+        session.exec(delete(LessonProgress).where(LessonProgress.lesson_id.in_(lesson_ids)))
     # 3. Exclui GenerationJobs vinculados ao curso
     jobs = session.exec(select(GenerationJob).where(GenerationJob.course_id == course_id)).all()
     for job in jobs:
@@ -550,13 +619,13 @@ def delete_course(course_id: int, session: Session = Depends(get_session)):
 
 @app.get("/api/lessons/{lesson_id}")
 def get_lesson(lesson_id: int, session: Session = Depends(get_session),
+               user: User = Depends(_auth.current_user),
                suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula nao encontrada")
-    if lesson.status == "locked":
-        # Fog-of-War: unrevealed lessons leak nothing — not even a title.
-        raise HTTPException(status_code=403, detail="Lesson not yet revealed. Complete the current step first.")
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
 
     mod = session.get(Module, lesson.module_id)
     course = session.get(Course, mod.course_id) if mod else None
@@ -574,14 +643,14 @@ def get_lesson(lesson_id: int, session: Session = Depends(get_session),
         "core_concept": lesson.core_concept,
         "content_markdown": lesson.content_markdown,
         "quiz": quiz_data,
-        "status": lesson.status,
-        "mcq_score": lesson.mcq_score,
-        "blanks_score": lesson.blanks_score,
-        "discursive_passed": lesson.discursive_passed,
-        "discursive_feedback": lesson.discursive_feedback,
-        "simulation_passed": lesson.simulation_passed,
-        "socratic_passed": lesson.socratic_passed,
-        "socratic_state": json.loads(lesson.socratic_state_json) if lesson.socratic_state_json else None
+        "status": effective.status,
+        "mcq_score": effective.mcq_score,
+        "blanks_score": effective.blanks_score,
+        "discursive_passed": effective.discursive_passed,
+        "discursive_feedback": effective.discursive_feedback,
+        "simulation_passed": effective.simulation_passed,
+        "socratic_passed": effective.socratic_passed,
+        "socratic_state": json.loads(effective.socratic_state_json) if effective.socratic_state_json else None
     }, suppress_counts)
 
 def check_and_unlock_lesson(session: Session, lesson: Lesson):
@@ -669,23 +738,8 @@ def _now_utc():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc)
 
-def _touch_activity(session: Session):
-    today = date.today().isoformat()
-    profile = session.get(LearnerProfile, 1)
-    if profile is None:
-        profile = LearnerProfile(id=1)
-        session.add(profile)
-    if profile.last_active_date == today:
-        return profile
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    if profile.last_active_date == yesterday:
-        profile.streak_days = (profile.streak_days or 0) + 1
-    else:
-        profile.streak_days = 1
-    profile.last_active_date = today
-    profile.updated_at = _now_utc()
-    session.add(profile)
-    return profile
+def _touch_activity(session: Session, user: User):
+    return _progress_store.touch_activity(session, user)
 
 def _gates_for(lesson: Lesson):
     """Compatibility view of the gate booleans (single source: progression)."""
@@ -707,8 +761,8 @@ def _require_stage(lesson: Lesson, stage: str):
         raise HTTPException(status_code=409, detail=_progression.stage_error(stage))
     return state
 
-def _completed_count(session: Session) -> int:
-    return len(session.exec(select(Lesson).where(Lesson.status == "completed")).all())
+def _completed_count(session: Session, user: User) -> int:
+    return _progress_store.completed_count(session, user)
 
 @app.get("/api/catalog/categories")
 def catalog_categories():
@@ -744,29 +798,28 @@ def get_catalog(category: Optional[str] = None, q: Optional[str] = None, difficu
     return _progression.strip_counts(out, suppress_counts)
 
 @app.get("/api/profile")
-def get_profile(session: Session = Depends(get_session)):
-    profile = session.get(LearnerProfile, 1)
-    if profile is None:
-        profile = LearnerProfile(id=1)
-        session.add(profile)
-        session.commit()
-    return {"id": profile.id, "display_name": profile.display_name}
+def get_profile(session: Session = Depends(get_session),
+                user: User = Depends(_auth.current_user)):
+    profile = _progress_store.profile_for(session, user)
+    return {"id": profile.id, "display_name": profile.display_name,
+            "username": user.username}
 
 @app.post("/api/profile/activity")
-def record_activity(session: Session = Depends(get_session)):
-    _touch_activity(session)
+def record_activity(session: Session = Depends(get_session),
+                    user: User = Depends(_auth.current_user)):
+    _touch_activity(session, user)
     session.commit()
     return {"success": True}
 
 @app.get("/api/profile/stats")
-def profile_stats(session: Session = Depends(get_session)):
-    profile = session.get(LearnerProfile, 1)
+def profile_stats(session: Session = Depends(get_session),
+                  user: User = Depends(_auth.current_user)):
+    profile = _progress_store.profile_for(session, user)
     reviews_completed = profile.reviews_completed if profile else 0
     streak = profile.streak_days if profile else 0
-    completed = _completed_count(session)
+    completed = _completed_count(session, user)
     xp = _catalog.xp_for_completed(completed, reviews_completed)
-    today = date.today().isoformat()
-    due = len(session.exec(select(ReviewItem).where(ReviewItem.due_on <= today)).all())
+    due = len(_progress_store.due_reviews(session, user))
     return {
         "xp": xp, "level": _catalog.level_for_xp(xp),
         "streak_days": streak, "completed_lessons": completed,
@@ -774,54 +827,67 @@ def profile_stats(session: Session = Depends(get_session)):
         "reviews_completed": reviews_completed, "reviews_due": due,
     }
 
+@app.get("/api/dashboard/mastery")
+def mastery_dashboard(session: Session = Depends(get_session),
+                      user: User = Depends(_auth.current_user)):
+    """Post-hoc mastery: only already-mastered work and due review items.
+
+    No totals, percentages, future lesson titles or remaining-work counts.
+    """
+    return _progress_store.mastery_dashboard(session, user)
+
 @app.get("/api/reviews/due")
-def reviews_due(session: Session = Depends(get_session)):
-    today = date.today().isoformat()
-    items = session.exec(select(ReviewItem).where(ReviewItem.due_on <= today).order_by(ReviewItem.due_on)).all()
+def reviews_due(session: Session = Depends(get_session),
+                user: User = Depends(_auth.current_user)):
     out = []
-    for it in items:
+    for it in _progress_store.due_reviews(session, user):
         lesson = session.get(Lesson, it.lesson_id)
         if lesson:
             out.append({"id": it.id, "lesson_id": lesson.id, "title": lesson.title,
-                        "due_on": it.due_on, "interval_days": it.interval_days, "misses": it.misses})
+                        "item_key": it.item_key, "kind": it.kind,
+                        "prompt": it.prompt, "expected": it.expected,
+                        "due_on": it.due_on, "interval_days": it.interval_days,
+                        "misses": it.misses})
     return out
 
+class ReviewCompleteRequest(BaseModel):
+    passed: bool = True
+
 @app.post("/api/reviews/{item_id}/complete")
-def complete_review(item_id: int, session: Session = Depends(get_session)):
-    item = session.get(ReviewItem, item_id)
-    if not item:
+def complete_review(item_id: int, req: Optional[ReviewCompleteRequest] = None,
+                    session: Session = Depends(get_session),
+                    user: User = Depends(_auth.current_user)):
+    owned = {item.id for item in _progress_store.all_reviews(session, user)}
+    if item_id not in owned:
         raise HTTPException(status_code=404, detail="Review item not found")
-    item.interval_days = max(1, item.interval_days * 2)
-    item.due_on = (date.today() + timedelta(days=item.interval_days)).isoformat()
-    profile = session.get(LearnerProfile, 1)
-    if profile is None:
-        profile = LearnerProfile(id=1)
-        session.add(profile)
-    profile.reviews_completed = (profile.reviews_completed or 0) + 1
-    session.add(item); session.add(profile); session.commit()
-    return {"success": True, "next_due_on": item.due_on}
+    item = session.get(ReviewItem, item_id)
+    next_due = _progress_store.complete_review(
+        session, user, item, passed=(req.passed if req else True)
+    )
+    session.commit()
+    return {"success": True, "next_due_on": next_due}
 
 @app.get("/api/lessons/{lesson_id}/gates")
-def lesson_gates(lesson_id: int, session: Session = Depends(get_session)):
+def lesson_gates(lesson_id: int, session: Session = Depends(get_session),
+                 user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Lesson not found")
-    if lesson.status == "locked":
-        raise HTTPException(status_code=403, detail="Lesson not yet revealed. Complete the current step first.")
-    return {"lesson_id": lesson.id, **_gates_for(lesson)}
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    return {"lesson_id": lesson.id, **_gates_for(effective)}
 
 @app.get("/api/courses/{course_id}/next-step")
 def course_next_step(course_id: int, session: Session = Depends(get_session),
+                     user: User = Depends(_auth.current_user),
                      suppress_counts: bool = Query(True, description="Strip totals/percent/ordinal counts (Fog-of-War)")):
     """Fog-of-War: ONLY the current step + already-completed steps are returned."""
     course = session.get(Course, course_id)
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    ordered = _ordered_lessons(session, course_id)
+    ordered = _progress_store.ordered(session, course_id, user)
     completed = [_lesson_summary(l) for _, l in ordered if l.status == "completed"]
-    current = next((l for _, l in ordered if l.status != "completed"), None)
-    if current is not None and current.status == "locked":
-        current = None
+    current = _progress_store.current(session, course_id, user)
     payload = {
         "course_id": course.id, "subject": course.subject, "level": course.level,
         "category": _catalog.classify_category(course.subject),
@@ -834,34 +900,38 @@ def course_next_step(course_id: int, session: Session = Depends(get_session),
     return _progression.strip_counts(payload, suppress_counts)
 
 @app.get("/api/courses/{course_id}/certificate")
-def course_certificate(course_id: int, session: Session = Depends(get_session)):
+def course_certificate(course_id: int, session: Session = Depends(get_session),
+                       user: User = Depends(_auth.current_user)):
     course = session.get(Course, course_id)
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    ordered = _ordered_lessons(session, course_id)
+    ordered = _progress_store.ordered(session, course_id, user)
     if not ordered or any(l.status != "completed" for _, l in ordered):
         raise HTTPException(status_code=403, detail="Certificate unlocks when every step is completed.")
     import hashlib
-    share_id = hashlib.sha256(f"{course.id}:{course.subject}".encode()).hexdigest()[:12]
+    share_id = hashlib.sha256(f"{course.id}:{course.subject}:{user.id}".encode()).hexdigest()[:12]
     return {
         "course_id": course.id, "subject": course.subject,
-        "completed_lessons": len(ordered),
-        "issued_at": date.today().isoformat(), "share_id": share_id,
+        "share_id": share_id,
+        "issued_at": date.today().isoformat(),
         "share_url": f"/course/{course.id}?share={share_id}",
     }
 
 @app.post("/api/lessons/{lesson_id}/submit-quiz")
-async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = Depends(get_session)):
+async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = Depends(get_session),
+                      user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz nao encontrado")
-    _require_revealed(lesson)
-    _require_stage(lesson, "quiz")
-    
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    _require_stage(effective, "quiz")
+
     quiz = json.loads(lesson.quiz_json)
-    
+
     # 1. Valida MCQ (no mínimo 2 acertos em 3 questões, ou 3 em 5)
     mcq_correct = 0
+    passed_mcq: set = set()
     mcqs = quiz.get("mcq", [])
     total_mcqs = len(mcqs)
     min_required = 2 if total_mcqs <= 3 else 3
@@ -871,35 +941,33 @@ async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = 
         for opt in q.get("options", []):
             if opt.get("is_correct") and opt.get("label") == chosen:
                 mcq_correct += 1
+                passed_mcq.add(idx)
                 break
 
     # 2. Valida Blanks
     blanks_correct = 0
+    passed_blanks: set = set()
     blanks = quiz.get("fill_in_the_blanks", [])
     for idx, b in enumerate(blanks):
         typed = req.blanks.get(str(idx), "").strip().lower()
         expected = b.get("correct_word", "").strip().lower()
         if typed == expected or (expected in typed and len(typed) >= 3):
             blanks_correct += 1
+            passed_blanks.add(idx)
 
-    lesson.mcq_score = mcq_correct
-    lesson.blanks_score = blanks_correct
-    check_and_unlock_lesson(session, lesson)
-    session.add(lesson)
+    _progress_store.apply(session, user, lesson,
+                          mcq_score=mcq_correct, blanks_score=blanks_correct)
+    _progress_store.unlock(session, user, lesson)
     is_passed = mcq_correct >= min_required
     if is_passed:
-        _touch_activity(session)
+        _touch_activity(session, user)
     else:
-        existing = session.exec(select(ReviewItem).where(ReviewItem.lesson_id == lesson_id)).first()
-        if existing:
-            existing.misses = (existing.misses or 0) + 1
-            existing.interval_days = 1
-            existing.due_on = (date.today() + timedelta(days=1)).isoformat()
-            session.add(existing)
-        else:
-            session.add(ReviewItem(lesson_id=lesson_id, due_on=(date.today() + timedelta(days=1)).isoformat(), interval_days=1, misses=1))
+        _progress_store.record_misses(
+            session, user, lesson, quiz, mcq_correct, blanks_correct,
+            correct_mcq_indices=passed_mcq, correct_blank_indices=passed_blanks,
+        )
     session.commit()
-    
+
     mod = session.get(Module, lesson.module_id)
     course = session.get(Course, mod.course_id) if mod else None
     is_en = bool(course and getattr(course, "language", "").startswith("en"))
@@ -909,21 +977,24 @@ async def submit_quiz(lesson_id: int, req: MCQSubmitRequest, session: Session = 
     else:
         msg = f"Você acertou {mcq_correct} de {total_mcqs} questões objetivas." if total_mcqs > 0 else f"Você acertou {blanks_correct} nas lacunas."
 
+    final_status = _progress_store.view(session, user, lesson).status
     return {
         "mcq_score": mcq_correct,
         "mcq_passed": is_passed,
         "blanks_score": blanks_correct,
-        "lesson_completed": lesson.status == "completed",
+        "lesson_completed": final_status == "completed",
         "message": msg
     }
 
 @app.post("/api/lessons/{lesson_id}/submit-discursive")
-async def submit_discursive(lesson_id: int, req: DiscursiveSubmitRequest, session: Session = Depends(get_session)):
+async def submit_discursive(lesson_id: int, req: DiscursiveSubmitRequest, session: Session = Depends(get_session),
+                            user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz nao encontrado")
-    _require_revealed(lesson)
-    _require_stage(lesson, "simulate")  # Logic gate: Grammar must pass first
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    _require_stage(effective, "simulate")  # Logic gate: Grammar must pass first
 
     quiz = json.loads(lesson.quiz_json)
     disc = quiz.get("discursive", {})
@@ -944,34 +1015,34 @@ async def submit_discursive(lesson_id: int, req: DiscursiveSubmitRequest, sessio
         language=course_language
     )
 
-    lesson.discursive_passed = evaluation.passed
-    lesson.discursive_feedback = evaluation.feedback
-
-    check_and_unlock_lesson(session, lesson)
-    session.add(lesson)
+    _progress_store.apply(session, user, lesson,
+                          discursive_passed=evaluation.passed,
+                          discursive_feedback=evaluation.feedback)
+    _progress_store.unlock(session, user, lesson)
     if evaluation.passed:
-        _touch_activity(session)
+        _touch_activity(session, user)
     session.commit()
 
     return {
         "passed": evaluation.passed,
         "score": evaluation.score,
         "feedback": evaluation.feedback,
-        "lesson_completed": lesson.status == "completed"
+        "lesson_completed": _progress_store.view(session, user, lesson).status == "completed"
     }
 
 @app.post("/api/lessons/{lesson_id}/submit-simulation")
-async def submit_simulation(lesson_id: int, req: SimulationSubmitRequest, session: Session = Depends(get_session)):
+async def submit_simulation(lesson_id: int, req: SimulationSubmitRequest, session: Session = Depends(get_session),
+                            user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz não encontrado")
-    _require_revealed(lesson)
-    _require_stage(lesson, "simulate")  # Logic gate: Grammar must pass first
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    _require_stage(effective, "simulate")  # Logic gate: Grammar must pass first
 
-    lesson.simulation_passed = True
-    check_and_unlock_lesson(session, lesson)
-    session.add(lesson)
-    _touch_activity(session)
+    _progress_store.apply(session, user, lesson, simulation_passed=True)
+    _progress_store.unlock(session, user, lesson)
+    _touch_activity(session, user)
     session.commit()
 
     mod = session.get(Module, lesson.module_id)
@@ -983,17 +1054,19 @@ async def submit_simulation(lesson_id: int, req: SimulationSubmitRequest, sessio
     return {
         "success": True,
         "simulation_passed": True,
-        "lesson_completed": lesson.status == "completed",
+        "lesson_completed": _progress_store.view(session, user, lesson).status == "completed",
         "message": sim_msg
     }
 
 @app.post("/api/lessons/{lesson_id}/socratic-duel")
-async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, session: Session = Depends(get_session)):
+async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, session: Session = Depends(get_session),
+                               user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.quiz_json:
         raise HTTPException(status_code=404, detail="Aula ou quiz não encontrado")
-    _require_revealed(lesson)
-    _require_stage(lesson, "teach_back")  # Rhetoric gate: Grammar + Logic first
+    effective = _progress_store.view(session, user, lesson)
+    _require_revealed(effective)
+    _require_stage(effective, "teach_back")  # Rhetoric gate: Grammar + Logic first
 
     quiz = json.loads(lesson.quiz_json)
     soc = quiz.get("socratic_duel") or quiz.get("discursive") or {}
@@ -1005,7 +1078,7 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
     level = course.level if course else "Básico"
     course_language = getattr(course, "language", "pt-BR") or "pt-BR" if course else "pt-BR"
 
-    state = json.loads(lesson.socratic_state_json) if lesson.socratic_state_json else {}
+    state = json.loads(effective.socratic_state_json) if effective.socratic_state_json else {}
 
     if req.round == 1:
         eval1 = await GraderAgent.evaluate_socratic_round1(
@@ -1022,8 +1095,8 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
             state["cognitive_knot"] = eval1.cognitive_knot
             state["round1_feedback"] = eval1.feedback
             state["current_round"] = 2
-            lesson.socratic_state_json = json.dumps(state, ensure_ascii=False)
-            session.add(lesson)
+            _progress_store.apply(session, user, lesson,
+                                  socratic_state_json=json.dumps(state, ensure_ascii=False))
             session.commit()
 
             return {
@@ -1060,22 +1133,21 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
             language=course_language
         )
 
-        lesson.socratic_passed = eval2.passed
         state["round2_answer"] = req.answer
         state["score"] = eval2.score
         state["final_feedback"] = eval2.feedback
         state["passed"] = eval2.passed
         state["current_round"] = 2 if not eval2.passed else 3
-        lesson.socratic_state_json = json.dumps(state, ensure_ascii=False)
-
+        _progress_store.apply(
+            session, user, lesson,
+            socratic_passed=eval2.passed,
+            discursive_passed=True if eval2.passed else effective.discursive_passed,
+            discursive_feedback=eval2.feedback if eval2.passed else effective.discursive_feedback,
+            socratic_state_json=json.dumps(state, ensure_ascii=False),
+        )
         if eval2.passed:
-            lesson.discursive_passed = True
-            lesson.discursive_feedback = eval2.feedback
-
-        check_and_unlock_lesson(session, lesson)
-        session.add(lesson)
-        if eval2.passed:
-            _touch_activity(session)
+            _progress_store.unlock(session, user, lesson)
+            _touch_activity(session, user)
         session.commit()
 
         return {
@@ -1083,20 +1155,21 @@ async def submit_socratic_duel(lesson_id: int, req: SocraticSubmitRequest, sessi
             "passed": eval2.passed,
             "score": eval2.score,
             "feedback": eval2.feedback,
-            "socratic_passed": lesson.socratic_passed,
-            "lesson_completed": lesson.status == "completed"
+            "socratic_passed": bool(eval2.passed),
+            "lesson_completed": _progress_store.view(session, user, lesson).status == "completed"
         }
     else:
         raise HTTPException(status_code=400, detail="Round inválido. Deve ser 1 ou 2.")
 
 
 @app.get("/api/lessons/{lesson_id}/download-pdf")
-async def download_pdf(lesson_id: int, session: Session = Depends(get_session)):
+async def download_pdf(lesson_id: int, session: Session = Depends(get_session),
+                       user: User = Depends(_auth.current_user)):
     from app.services.pdf_service import PDFService
     lesson = session.get(Lesson, lesson_id)
     if not lesson or not lesson.content_markdown:
         raise HTTPException(status_code=404, detail="Conteudo da aula nao encontrado")
-    _require_revealed(lesson)  # a locked lesson's PDF would leak its content
+    _require_revealed(_progress_store.view(session, user, lesson))
 
     mod = session.get(Module, lesson.module_id)
     mod_title = f"Modulo {mod.module_number}: {mod.title}" if mod else "Apostila de Aula"
@@ -1125,17 +1198,20 @@ class LessonChatSubmitRequest(BaseModel):
     message: str
 
 @app.get("/api/lessons/{lesson_id}/chat")
-def get_lesson_chat_history(lesson_id: int, session: Session = Depends(get_session)):
+def get_lesson_chat_history(lesson_id: int, session: Session = Depends(get_session),
+                            user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula não encontrada")
-    _require_revealed(lesson)
-    
+    _require_revealed(_progress_store.view(session, user, lesson))
+
     messages = session.exec(
         select(LessonChatMessage)
         .where(LessonChatMessage.lesson_id == lesson_id)
         .order_by(LessonChatMessage.created_at.asc())
     ).all()
+    messages = [m for m in messages
+                if m.user_id == user.id or (m.user_id is None and _progress_store.is_local(user))]
 
     return [
         {
@@ -1151,7 +1227,8 @@ def get_lesson_chat_history(lesson_id: int, session: Session = Depends(get_sessi
 async def send_lesson_chat_message(
     lesson_id: int,
     req: LessonChatSubmitRequest,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    user: User = Depends(_auth.current_user)
 ):
     clean_msg = req.message.strip()
     if not clean_msg:
@@ -1162,7 +1239,7 @@ async def send_lesson_chat_message(
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula não encontrada")
-    _require_revealed(lesson)
+    _require_revealed(_progress_store.view(session, user, lesson))
 
     mod = session.get(Module, lesson.module_id)
     course = session.get(Course, mod.course_id) if mod else None
@@ -1172,6 +1249,7 @@ async def send_lesson_chat_message(
     # 1. Salva a mensagem do usuário no histórico
     user_chat = LessonChatMessage(
         lesson_id=lesson_id,
+        user_id=user.id,
         role="user",
         content=clean_msg
     )
@@ -1185,6 +1263,8 @@ async def send_lesson_chat_message(
         .where(LessonChatMessage.lesson_id == lesson_id)
         .order_by(LessonChatMessage.created_at.asc())
     ).all()
+    history = [m for m in history
+               if m.user_id == user.id or (m.user_id is None and _progress_store.is_local(user))]
 
     # 3. Invoca o TutorService (otimizado para tokens, linguagem simples e exemplos práticos)
     try:
@@ -1204,6 +1284,7 @@ async def send_lesson_chat_message(
     # 4. Salva a resposta do assistente no banco
     assistant_chat = LessonChatMessage(
         lesson_id=lesson_id,
+        user_id=user.id,
         role="assistant",
         content=assistant_content
     )
@@ -1219,13 +1300,19 @@ async def send_lesson_chat_message(
     }
 
 @app.delete("/api/lessons/{lesson_id}/chat")
-def clear_lesson_chat_history(lesson_id: int, session: Session = Depends(get_session)):
+def clear_lesson_chat_history(lesson_id: int, session: Session = Depends(get_session),
+                              user: User = Depends(_auth.current_user)):
     lesson = session.get(Lesson, lesson_id)
     if not lesson:
         raise HTTPException(status_code=404, detail="Aula não encontrada")
-    _require_revealed(lesson)
+    _require_revealed(_progress_store.view(session, user, lesson))
 
-    session.exec(delete(LessonChatMessage).where(LessonChatMessage.lesson_id == lesson_id))
+    messages = session.exec(
+        select(LessonChatMessage).where(LessonChatMessage.lesson_id == lesson_id)
+    ).all()
+    for msg in messages:
+        if msg.user_id == user.id or (msg.user_id is None and _progress_store.is_local(user)):
+            session.delete(msg)
     session.commit()
 
     return {"status": "cleared", "lesson_id": lesson_id}

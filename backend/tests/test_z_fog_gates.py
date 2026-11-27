@@ -24,9 +24,11 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp()}/fog_gates
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
 from sqlmodel import Session, delete, select  # noqa: E402
 
-from app.database import engine, init_db  # noqa: E402
+import app.database as db  # noqa: E402
+from app.database import init_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.entities import (  # noqa: E402
     Course, Lesson, LessonChatMessage, LearnerProfile, Module, ReviewItem,
@@ -45,6 +47,17 @@ COUNT_KEYS = {
     "module_count", "remaining", "progress_percent", "percent_complete",
     "lesson_number", "module_number",
 }
+
+
+@pytest.fixture(scope="module", autouse=True)
+def isolated_db():
+    """Bind this module to a private DB: app.database is imported once per suite."""
+    original = db.engine
+    path = Path(tempfile.mkdtemp(prefix="trivium-fog-")) / "test.db"
+    db.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+    init_db()
+    yield
+    db.engine = original
 
 
 def _quiz():
@@ -111,7 +124,7 @@ def seeded():
     init_db()
     tag = uuid.uuid4().hex[:8]
     subject = f"FogGate Lab {tag}"
-    with Session(engine) as s:
+    with Session(db.engine) as s:
         course = Course(subject=subject, level="Básico", language="en-US")
         s.add(course); s.commit(); s.refresh(course)
         m1 = Module(course_id=course.id, module_number=1, title="Visible Module",
@@ -136,7 +149,7 @@ def seeded():
     client = TestClient(app)
     yield client, ids, subject
     # Keep the shared test DB clean for sibling tests.
-    with Session(engine) as s:
+    with Session(db.engine) as s:
         lesson_ids = list(ids[1:])
         s.exec(delete(LessonChatMessage).where(LessonChatMessage.lesson_id.in_(lesson_ids)))
         s.exec(delete(ReviewItem).where(ReviewItem.lesson_id.in_(lesson_ids)))
@@ -321,7 +334,7 @@ def test_discursive_grading_is_the_logic_gate_without_simulation(seeded, monkeyp
     client, (cid, l1, l2, l3), subject = seeded
 
     # Force the discursive variant: remove the decision simulation from the quiz.
-    with Session(engine) as s:
+    with Session(db.engine) as s:
         lesson = s.get(Lesson, l1)
         quiz = json.loads(lesson.quiz_json)
         quiz.pop("simulation", None)
